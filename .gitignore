@@ -8,6 +8,7 @@ dist2/
 # 本地工具 / IDE
 .npm-shim/
 .trae/
+.trae-html-share-packages/
 .vscode/
 .idea/
 
