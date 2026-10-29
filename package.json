@@ -1,0 +1,40 @@
+{
+  "name": "campus-bell-system",
+  "productName": "校园音乐铃声系统",
+  "version": "1.0.0",
+  "description": "校园自动音乐铃声播放系统 - 按作息时间自动播放铃声，支持多方案、音乐库与播放日志",
+  "main": "main.js",
+  "author": "Campus Bell",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.campus.bell",
+    "productName": "校园音乐铃声系统",
+    "copyright": "Copyright © 2026 Campus Bell",
+    "directories": { "output": "dist2" },
+    "electronDist": "node_modules/electron/dist",
+    "files": ["main.js", "preload.js", "icon.png", "lib/**/*", "src/**/*", "package.json"],
+    "win": {
+      "icon": "icon.png",
+      "target": [{ "target": "nsis", "arch": ["x64"] }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "language": "2052",
+      "shortcutName": "校园音乐铃声系统"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "NeteaseCloudMusicApi": "^4.32.0"
+  }
+}

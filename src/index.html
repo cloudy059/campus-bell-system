@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' file: https:; img-src 'self' data: https:">
+  <title>校园音乐铃声系统</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- 顶部标题栏（可拖拽） -->
+    <header id="titlebar">
+      <div class="tb-left">
+        <span class="tb-logo" id="tb-logo"></span>
+        <span class="tb-title">校园音乐铃声系统</span>
+        <span class="tb-badge">Campus Bell</span>
+      </div>
+      <div class="tb-actions">
+        <button class="tb-btn" id="btn-win-min" title="最小化"></button>
+        <button class="tb-btn" id="btn-win-max" title="最大化 / 还原"></button>
+        <button class="tb-btn tb-close" id="btn-win-close" title="关闭（最小化到托盘，铃声继续）"></button>
+      </div>
+    </header>
+
+    <div id="layout">
+      <!-- 左侧导航 -->
+      <nav id="sidebar">
+        <div class="nav-item active" data-page="dashboard" id="nav-dashboard"><span class="nav-ico"></span>仪表盘</div>
+        <div class="nav-item" data-page="music" id="nav-music"><span class="nav-ico"></span>铃声管理</div>
+        <div class="nav-item" data-page="schedules" id="nav-schedules"><span class="nav-ico"></span>定时打铃</div>
+        <div class="nav-item" data-page="exams" id="nav-exams"><span class="nav-ico"></span>考试播报</div>
+        <div class="nav-item" data-page="logs" id="nav-logs"><span class="nav-ico"></span>播放记录</div>
+        <div class="nav-item" data-page="settings" id="nav-settings"><span class="nav-ico"></span>系统设置</div>
+        <div id="sidebar-foot">
+          <div id="sb-status"><span class="dot dot-ok"></span>调度运行中</div>
+        </div>
+      </nav>
+
+      <!-- 内容区 -->
+      <main id="content">
+
+        <!-- 仪表盘 -->
+        <section class="page active" id="page-dashboard">
+          <div class="dash-grid">
+            <div class="card clock-card">
+              <div class="clock-label">现在时刻</div>
+              <div class="clock-time" id="clock-time">--:--:--</div>
+              <div class="clock-date" id="clock-date"></div>
+              <div class="clock-chips">
+                <span class="chip" id="chip-set">—</span>
+                <span class="chip chip-mute hidden" id="chip-mute"></span>
+              </div>
+            </div>
+            <div class="card next-card">
+              <div class="card-title">下次铃声</div>
+              <div class="next-name" id="next-name">今日暂无铃声</div>
+              <div class="next-countdown" id="next-countdown">--:--</div>
+              <div class="next-time" id="next-time"></div>
+              <button class="btn ghost sm" id="btn-preview-next">试听该铃声</button>
+            </div>
+            <div class="card quick-card">
+              <div class="card-title">快捷操作</div>
+              <div class="quick-btns">
+                <button class="btn" id="btn-mute-30">静音 30 分钟</button>
+                <button class="btn ghost" id="btn-mute-today">考试模式 · 今日静音</button>
+                <button class="btn warn hidden" id="btn-mute-cancel">取消静音</button>
+              </div>
+              <div class="muted-note" id="mute-note">临时静音期间，自动铃声将被跳过并记录。</div>
+            </div>
+          </div>
+          <div class="card exam-status-card hidden" id="exam-status-card">
+            <div class="card-title-row">
+              <div class="card-title">考试播报状态</div>
+            </div>
+            <div id="exam-status-list"></div>
+          </div>
+          <div class="card timeline-card">
+            <div class="card-title-row">
+              <div class="card-title">今日铃声时间线</div>
+              <div class="timeline-sum" id="timeline-sum"></div>
+            </div>
+            <div id="today-list"></div>
+          </div>
+        </section>
+
+        <!-- 铃声方案 -->
+        <section class="page" id="page-schedules">
+          <div class="page-head">
+            <h2>铃声方案</h2>
+            <button class="btn primary" id="btn-add-set">＋ 新建方案</button>
+          </div>
+          <p class="page-tip">系统按「星期几」自动匹配启用的方案；特殊日期（假期 / 考试周）可单独调整。修改即时自动保存。</p>
+          <div class="card overrides-card">
+            <div class="card-title">特殊日期</div>
+            <div id="overrides-list"></div>
+            <div class="ov-actions">
+              <button class="btn ghost sm" id="btn-add-override">＋ 添加特殊日期</button>
+              <button class="btn ghost sm" id="btn-import-holidays">导入节假日模板</button>
+            </div>
+          </div>
+          <div id="sets-list"></div>
+        </section>
+
+        <!-- 考试播报 -->
+        <section class="page" id="page-exams">
+          <div class="page-head">
+            <h2>考试播报</h2>
+            <div class="head-actions">
+              <button class="btn ghost" id="btn-manage-schemes">播报节点方案</button>
+              <button class="btn primary" id="btn-add-exam">＋ 添加考试</button>
+            </div>
+          </div>
+          <p class="page-tip">考试的播报节点统一在「播报节点方案」中维护，每个节点可选择触发时机（开考前、结束前、开始考试、考试结束）并从铃声库选择铃声（音乐或语音均可）；可创建多套方案，添加考试时选一套即可作用于该考试，不使用方案的考试不播报。语音请先在「铃声库 → 文字转语音」中生成。考试播报独立于临时静音，到点必定播报。</p>
+          <div id="exams-list"></div>
+        </section>
+
+        <!-- 铃声库 -->
+        <section class="page" id="page-music">
+          <div class="page-head">
+            <h2>铃声库 <span class="count-badge" id="lib-count">0</span></h2>
+            <div class="head-actions">
+              <input class="search" id="music-search" type="text" placeholder="搜索铃声名称…">
+              <button class="btn ghost" id="btn-tts">文字转语音</button>
+              <button class="btn ghost" id="btn-online">在线音乐</button>
+              <button class="btn primary" id="btn-import">导入音乐</button>
+            </div>
+          </div>
+
+          <!-- 本地音乐视图 -->
+          <div id="music-local">
+            <p class="page-tip">支持 MP3 / WAV / M4A / OGG / FLAC，导入后文件由系统统一管理，即使原文件被删除也不影响播放。也可用「文字转语音」把播报文字直接做成语音铃声。</p>
+            <div class="music-grid" id="music-grid"></div>
+            <div class="empty hidden" id="music-empty">
+              <div class="empty-ico"></div>
+              <div>铃声库为空，点击右上角「导入音乐」添加</div>
+            </div>
+          </div>
+
+          <!-- 在线音乐视图（网易云音乐，下载入库后本地播放） -->
+          <div id="music-online" class="hidden">
+            <p class="page-tip">在线音乐来自网易云音乐，下载后保存到本地铃声库，铃声播放不依赖网络。VIP 歌曲未登录时可能仅能下载试听片段（约 30 秒，一般足够铃声使用）。</p>
+            <div class="ol-two-col">
+              <div class="card">
+                <div class="online-search-row">
+                  <input class="modal-input" id="ol-kw" type="text" maxlength="60" placeholder="输入歌曲 / 歌手名，回车搜索…">
+                  <button class="btn" id="ol-search-btn">搜索歌曲</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="online-search-row">
+                  <input class="modal-input" id="ol-pl" type="text" maxlength="120" placeholder="粘贴网易云音乐歌单链接或 ID，批量下载到本地…">
+                  <button class="btn" id="ol-pl-btn">导入歌单</button>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="ol-quick">
+                <button class="btn ghost" id="ol-daily">个性推荐</button>
+                <button class="btn ghost" id="ol-discover">发现音乐</button>
+              </div>
+              <div class="ol-pls hidden" id="ol-pls"></div>
+            </div>
+            <div class="card table-card">
+              <div class="card-title-row">
+                <div class="card-title" id="ol-result-title">搜索结果</div>
+                <div class="ol-toolbar">
+                  <span class="ol-info" id="ol-pl-info"></span>
+                  <button class="btn sm ghost hidden" id="ol-dl-all">批量下载</button>
+                </div>
+              </div>
+              <table class="data-table">
+                <thead><tr><th>歌曲</th><th>歌手</th><th>时长</th><th class="ta-r">操作</th></tr></thead>
+                <tbody id="ol-body"></tbody>
+              </table>
+              <div class="empty small hidden" id="ol-empty">输入关键词搜索，或粘贴歌单链接导入</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 播放记录 -->
+        <section class="page" id="page-logs">
+          <div class="page-head">
+            <h2>播放记录</h2>
+            <button class="btn danger-ghost" id="btn-clear-logs">清空记录</button>
+          </div>
+          <div class="card table-card">
+            <table class="data-table">
+              <thead>
+                <tr><th>时间</th><th>类型</th><th>铃声</th><th>音乐</th><th>音量</th><th>结果</th></tr>
+              </thead>
+              <tbody id="logs-body"></tbody>
+            </table>
+            <div class="empty small hidden" id="logs-empty">暂无播放记录</div>
+          </div>
+        </section>
+
+        <!-- 系统设置 -->
+        <section class="page" id="page-settings">
+          <div class="page-head"><h2>系统设置</h2></div>
+          <div class="settings-grid">
+            <div class="settings-col">
+            <div class="card">
+              <div class="card-title">播放</div>
+              <div class="form-row">
+                <label>主音量 <b id="vol-show">85%</b></label>
+                <input type="range" id="set-volume" min="0" max="100" step="1" value="85">
+              </div>
+              <div class="form-row">
+                <label>淡入时长（秒）</label>
+                <input type="number" id="set-fadein" min="0" max="10" step="0.5" value="0">
+              </div>
+              <div class="form-row">
+                <label>淡出时长（秒）</label>
+                <input type="number" id="set-fadeout" min="0" max="10" step="0.5" value="0">
+              </div>
+              <div class="form-row">
+                <label>音频输出设备</label>
+                <select id="set-output"></select>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-title">数据备份</div>
+              <div class="form-row">
+                <label>导出备份<br><small>铃声方案、曲库、设置与全部音频，保存到您选择的文件夹</small></label>
+                <button class="btn ghost sm" id="btn-backup-export">导出备份</button>
+              </div>
+              <div class="form-row">
+                <label>从备份恢复<br><small>覆盖当前数据并自动重启应用</small></label>
+                <button class="btn ghost sm" id="btn-backup-restore">恢复备份</button>
+              </div>
+            </div>
+            </div>
+            <div class="settings-col">
+            <div class="card">
+              <div class="card-title">外观</div>
+              <div class="form-row">
+                <label>界面主题<br><small>深色 / 亮色，切换即时生效</small></label>
+                <select id="set-theme">
+                  <option value="dark">深色</option>
+                  <option value="light">亮色</option>
+                </select>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-title">系统集成</div>
+              <div class="form-row switch-row">
+                <label>开机自动启动</label>
+                <label class="switch"><input type="checkbox" id="set-autolaunch"><span class="slider"></span></label>
+              </div>
+              <div class="form-row switch-row">
+                <label>运行时阻止电脑休眠<br><small>防止休眠导致铃声漏播；屏幕仍会正常关闭</small></label>
+                <label class="switch"><input type="checkbox" id="set-keepawake"><span class="slider"></span></label>
+              </div>
+              <div class="form-row switch-row">
+                <label>关闭窗口时<br><small>最小化到系统托盘，铃声继续按时播放</small></label>
+                <span class="chip chip-ok">已启用</span>
+              </div>
+              <div class="form-row">
+                <label>数据目录<br><small id="data-dir-show">—</small></label>
+                <button class="btn ghost sm" id="btn-open-data">打开目录</button>
+              </div>
+            </div>
+            <div class="card about-card">
+              <div class="card-title">关于</div>
+              <div class="about-rows">
+                <div><span>应用名称</span><b>校园音乐铃声系统</b></div>
+                <div><span>版本</span><b id="about-version">—</b></div>
+                <div><span>运行环境</span><b>Electron 桌面应用</b></div>
+              </div>
+            </div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+
+    <!-- 底部播放条 -->
+    <footer id="playerbar">
+      <div class="pb-left">
+        <div class="pb-eq" id="pb-eq"><i></i><i></i><i></i><i></i></div>
+        <div class="pb-info">
+          <div class="pb-name" id="pb-name">未在播放</div>
+          <div class="pb-sub" id="pb-sub">等待下一次铃声</div>
+        </div>
+      </div>
+      <div class="pb-center">
+        <button class="pb-btn" id="pb-toggle" title="播放 / 暂停"></button>
+        <button class="pb-btn" id="pb-stop" title="停止"></button>
+        <div class="pb-progress">
+          <input type="range" id="pb-seek" min="0" max="100" step="0.1" value="0">
+        </div>
+        <div class="pb-time" id="pb-time">0:00 / 0:00</div>
+      </div>
+      <div class="pb-right">
+        <span class="pb-volico" id="pb-volico"></span>
+        <input type="range" id="pb-volume" min="0" max="100" step="1" value="85">
+      </div>
+    </footer>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <script src="app.js"></script>
+</body>
+</html>

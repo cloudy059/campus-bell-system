@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 打包输出
+dist/
+dist2/
+
+# 本地工具 / IDE
+.npm-shim/
+.trae/
+.vscode/
+.idea/
+
+# 构建日志与临时文件
+.build-log.txt
+*.log
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
