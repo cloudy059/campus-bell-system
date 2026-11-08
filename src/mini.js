@@ -15,9 +15,13 @@ const secToHM = (sec) => `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec %
 
 const state = { sets: [], overrides: [], exams: [] };
 
-/* 今日生效的铃声（特殊日期覆盖 + 按星期匹配启用方案） */
+/* 今日生效的铃声（特殊日期覆盖 + 按星期匹配启用方案）
+   与主界面一致：特殊日期支持 date ~ endDate 范围，单日记录优先于范围记录 */
+const ovEndOf = (o) => (o.endDate && o.endDate >= o.date) ? o.endDate : o.date;
 function resolveToday(now) {
-  const ov = (state.overrides || []).find(o => o.date === dateKey(now));
+  const key = dateKey(now);
+  const hits = (state.overrides || []).filter(o => String(o.date) <= key && key <= ovEndOf(o));
+  const ov = hits.find(o => ovEndOf(o) === o.date) || hits[0];
   if (ov) {
     if (ov.type === 'holiday') return [];
     const s = state.sets.find(x => x.id === ov.setId);

@@ -39,7 +39,8 @@ contextBridge.exposeInMainWorld('bellApi', {
   },
   exams: {
     load: () => ipcRenderer.invoke('exams:load'),
-    save: (data) => ipcRenderer.invoke('exams:save', data)
+    save: (data) => ipcRenderer.invoke('exams:save', data),
+    sample: () => ipcRenderer.invoke('exams:sample')
   },
   examSchemes: {
     load: () => ipcRenderer.invoke('exam-schemes:load'),

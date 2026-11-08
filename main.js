@@ -9,6 +9,7 @@ const tls = require('tls');
 const crypto = require('crypto');
 const { readJson, writeJson } = require('./lib/store');
 const { buildSeedLibrary, defaultSchedule } = require('./lib/seed-music');
+const { defaultExams, defaultExamSchemes, gaokaoOverride } = require('./lib/default-exams');
 const nc = require('NeteaseCloudMusicApi'); // 网易云音乐 API（在线音乐来源，SPlayer 同源）
 
 // 打铃调度器是渲染进程里 250ms 的 setInterval，窗口隐藏到托盘 / 被遮挡时
@@ -236,7 +237,8 @@ function init() {
   app.on('will-quit', () => applyKeepAwake(false)); // 退出时释放，恢复系统默认电源策略
 }
 
-/** 首次运行：生成内置铃声与默认作息方案 */
+/** 首次运行：生成内置铃声、默认作息方案与 2026 高考示例考试
+ *  已存在的数据文件一律不覆盖（用户主动清空考试后不会又被写回）。 */
 function seedFirstRun() {
   if (!fs.existsSync(LIB_FILE)) {
     const items = buildSeedLibrary(MEDIA_DIR);
@@ -246,6 +248,14 @@ function seedFirstRun() {
   if (!fs.existsSync(SCH_FILE)) {
     writeJson(SCH_FILE, defaultSchedule());
     console.log('[seed] 已生成默认作息方案');
+  }
+  if (!fs.existsSync(EXAM_FILE)) {
+    writeJson(EXAM_FILE, { exams: defaultExams() });
+    console.log('[seed] 已生成 2026 高考示例考试');
+  }
+  if (!fs.existsSync(EXAM_SCHEMES_FILE)) {
+    writeJson(EXAM_SCHEMES_FILE, { schemes: defaultExamSchemes() });
+    console.log('[seed] 已生成高考标准播报方案');
   }
 }
 
@@ -842,6 +852,8 @@ function registerIpc() {
   // 考试播报安排
   ipcMain.handle('exams:load', () => readJson(EXAM_FILE, { exams: [] }));
   ipcMain.handle('exams:save', (_e, data) => { writeJson(EXAM_FILE, { exams: (data && data.exams) || [] }); return { ok: true }; });
+  // 内置高考示例（供「载入高考示例」按钮使用，始终返回全新副本）
+  ipcMain.handle('exams:sample', () => ({ exams: defaultExams(), schemes: defaultExamSchemes(), override: gaokaoOverride() }));
 
   // 考试播报节点方案（多套可复用，考试通过 schemeId 引用）
   ipcMain.handle('exam-schemes:load', () => readJson(EXAM_SCHEMES_FILE, { schemes: [] }));

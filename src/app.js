@@ -28,7 +28,8 @@ const ICONS = {
   restore: _svg('<path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/><rect x="4" y="8" width="12" height="12" rx="2"/>'),
   check: _svg('<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>'),
   alert: _svg('<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>'),
-  info: _svg('<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>')
+  info: _svg('<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'),
+  chevron: _svg('<polyline points="9 18 15 12 9 6"/>')
 };
 const icon = (n) => ICONS[n] || '';
 
@@ -52,7 +53,7 @@ const updateFill = (input, pct) => input.style.setProperty('--fill', pct + '%');
 const eqHtml = () => `<div class="eq"><i></i><i></i><i></i><i></i></div>`;
 
 /* ---------- 全局状态 ---------- */
-const DEFAULT_SETTINGS = { volume: 0.85, fadeIn: 0, fadeOut: 0, outputDevice: 'default', tempMuteUntil: null, theme: 'dark', keepAwake: true };
+const DEFAULT_SETTINGS = { volume: 0.85, fadeIn: 0, fadeOut: 0, outputDevice: 'default', tempMuteUntil: null, theme: 'dark', keepAwake: true, ovCollapsed: false };
 const state = {
   library: { items: [] },
   schedules: { sets: [], overrides: [] },
@@ -97,7 +98,7 @@ async function init() {
 
   const [lib, sch, set, exa, esch] = await Promise.all([bellApi.library.list(), bellApi.schedules.load(), bellApi.settings.load(), bellApi.exams.load(), bellApi.examSchemes.load()]);
   state.library = lib && lib.items ? lib : { items: [] };
-  state.schedules = sch && sch.sets ? { sets: sch.sets, overrides: sch.overrides || [] } : { sets: [], overrides: [] };
+  state.schedules = sch && sch.sets ? { sets: sch.sets, overrides: normalizeOverrides(sch.overrides) } : { sets: [], overrides: [] };
   state.exams = exa && exa.exams ? exa : { exams: [] };
   state.examSchemes = esch && esch.schemes ? esch : { schemes: [] };
   state.settings = { ...DEFAULT_SETTINGS, ...(set || {}) };
@@ -120,6 +121,7 @@ async function init() {
   syncSettingsUI();
   renderSets();
   renderOverrides();
+  setOvContainerCollapsed(state.settings.ovCollapsed === true, false);
   renderMusic();
   renderLogs();
   updateLibCount();
@@ -139,6 +141,7 @@ function injectIcons() {
   $('#btn-add-set').innerHTML = icon('plus') + '<span>新建方案</span>';
   $('#btn-add-exam').innerHTML = icon('plus') + '<span>添加考试</span>';
   $('#btn-add-override').innerHTML = icon('plus') + '<span>添加特殊日期</span>';
+  $('#ov-container-caret').innerHTML = icon('chevron');
   $('#pb-volico').innerHTML = icon('volume');
   $('#pb-toggle').innerHTML = icon('play');
   $('#pb-stop').innerHTML = icon('stop');
@@ -196,15 +199,54 @@ const fmtAdv = (sec) => {
 const bellDurOf = (b) => Number(b.duration) > 0 ? Math.round(Number(b.duration)) : 0;
 
 /* ============================================================
+   特殊日期（支持日期范围 / 自定义名称 / 卡片收起）
+   ------------------------------------------------------------
+   记录结构：{ id, name, date, endDate, type, setId, collapsed }
+   - date 为起始日，endDate 为空或等于 date 表示单日；范围内首尾都生效
+   - 旧数据只有 date，加载时由 normalizeOverrides 补齐字段，完全兼容
+   ============================================================ */
+function normalizeOverrides(list) {
+  return (Array.isArray(list) ? list : []).map(o => ({
+    ...o,
+    id: o.id || uid(),
+    name: String(o.name || '').slice(0, 30),
+    date: o.date || dateKey(new Date()),
+    endDate: o.endDate || '',
+    collapsed: !!o.collapsed
+  }));
+}
+const ovEndOf = (o) => (o.endDate && o.endDate >= o.date) ? o.endDate : o.date;
+const ovIsSingle = (o) => ovEndOf(o) === o.date;
+const ovCovers = (o, key) => String(o.date) <= key && key <= ovEndOf(o);
+const ovLabelOf = (o) => (o.name || '').trim() || (o.type === 'holiday' ? '假期（不打铃）' : '特殊安排');
+const dayNumOf = (k) => { const [y, m, d] = String(k).split('-').map(Number); return Math.round(Date.UTC(y, m - 1, d) / 86400000); };
+const ovDaysOf = (o) => Math.max(1, dayNumOf(ovEndOf(o)) - dayNumOf(o.date) + 1);
+const fmtOvDay = (k) => { const [y, m, d] = String(k).split('-').map(Number); return `${y}年${m}月${d}日`; };
+function fmtOvRange(o) {
+  const start = o.date, end = ovEndOf(o);
+  if (start === end) return fmtOvDay(start);
+  const [sy] = start.split('-');
+  const [ey, em, ed] = end.split('-');
+  const endTxt = ey !== sy ? fmtOvDay(end) : `${+em}月${+ed}日`;
+  return `${fmtOvDay(start)} ~ ${endTxt}（${ovDaysOf(o)} 天）`;
+}
+function sortOverrides() {
+  state.schedules.overrides.sort((a, b) => a.date.localeCompare(b.date) || String(a.id).localeCompare(String(b.id)));
+}
+
+/* ============================================================
    今日方案解析 + 调度引擎
    ============================================================ */
 function resolveToday(now) {
   const key = dateKey(now);
-  const ov = (state.schedules.overrides || []).find(o => o.date === key);
+  // 同一天命中多条时，单日记录优先于范围记录（更具体的安排生效）
+  const hits = (state.schedules.overrides || []).filter(o => ovCovers(o, key));
+  const ov = hits.find(o => ovIsSingle(o)) || hits[0];
   if (ov) {
-    if (ov.type === 'holiday') return { set: null, bells: [], label: '特殊安排 · 假期（不打铃）', holiday: true };
+    const name = ovLabelOf(ov);
+    if (ov.type === 'holiday') return { set: null, bells: [], label: `特殊安排 · ${name}`, holiday: true };
     const s = state.schedules.sets.find(x => x.id === ov.setId);
-    if (s) return { set: s, bells: bellsOf(s), label: `特殊安排 · ${s.name}`, holiday: false };
+    if (s) return { set: s, bells: bellsOf(s), label: `特殊安排 · ${name} · ${s.name}`, holiday: false };
   }
   const wd = now.getDay();
   const set = state.schedules.sets.find(s => s.enabled && (s.days || []).includes(wd));
@@ -698,6 +740,12 @@ function saveSchedulesSoon() {
 const findSet = (id) => state.schedules.sets.find(s => s.id === id);
 
 function bindSchedulesPage() {
+  // 整个特殊日期容器：点击标题栏或按 Enter / 空格收起 / 展开
+  const ovHead = $('#ov-container-toggle');
+  ovHead.addEventListener('click', () => setOvContainerCollapsed(!state.settings.ovCollapsed));
+  ovHead.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOvContainerCollapsed(!state.settings.ovCollapsed); }
+  });
   $('#btn-add-set').addEventListener('click', () => {
     state.schedules.sets.push({
       id: uid(), name: '新方案 ' + (state.schedules.sets.length + 1),
@@ -707,10 +755,28 @@ function bindSchedulesPage() {
     toast('已创建新方案，请添加铃声时间', 'success');
   });
   $('#btn-add-override').addEventListener('click', () => {
-    state.schedules.overrides.push({ date: dateKey(new Date()), type: 'holiday', setId: state.schedules.sets[0] ? state.schedules.sets[0].id : null });
-    renderOverrides(); saveSchedulesSoon();
+    ensureOvContainerOpen(); // 收起状态下添加，自动展开让用户看到新卡片
+    const o = {
+      id: uid(), name: '', date: dateKey(new Date()), endDate: '',
+      type: 'holiday', setId: state.schedules.sets[0] ? state.schedules.sets[0].id : null,
+      collapsed: false
+    };
+    state.schedules.overrides.push(o);
+    sortOverrides();
+    renderOverrides(o.id);
+    saveSchedulesSoon();
+    const input = document.querySelector(`.ov-card[data-id="${CSS.escape(o.id)}"] .ov-name`);
+    if (input) { input.focus(); input.select(); }
   });
   $('#btn-import-holidays').addEventListener('click', importHolidays);
+  $('#btn-ov-toggle-all').addEventListener('click', () => {
+    const ovs = state.schedules.overrides || [];
+    if (!ovs.length) return;
+    const allCollapsed = ovs.every(o => o.collapsed);
+    ovs.forEach(o => { o.collapsed = !allCollapsed; });
+    renderOverrides();
+    saveSchedulesSoon();
+  });
 
   // 方案卡片（事件委托）
   const box = $('#sets-list');
@@ -777,25 +843,57 @@ function bindSchedulesPage() {
     }
   });
 
-  // 特殊日期（事件委托）
+  // 特殊日期（事件委托）：id 定位，排序 / 折叠都不影响编辑目标
   const ovBox = $('#overrides-list');
+  const findOv = (t) => (state.schedules.overrides || []).find(o => o.id === t.dataset.id);
+  ovBox.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t.classList.contains('ov-name')) return;
+    const o = findOv(t);
+    if (!o) return;
+    o.name = t.value.slice(0, 30);
+    refreshOvHead(o);
+    saveSchedulesSoon();
+  });
   ovBox.addEventListener('change', (e) => {
     const t = e.target;
-    const o = state.schedules.overrides[Number(t.dataset.idx)];
+    const o = findOv(t);
     if (!o) return;
-    if (t.classList.contains('ov-date')) o.date = t.value || dateKey(new Date());
-    else if (t.classList.contains('ov-type')) {
+    const card = t.closest('.ov-card');
+    if (t.classList.contains('ov-date')) {
+      o.date = t.value || dateKey(new Date());
+      const endIn = card.querySelector('.ov-end');
+      if (endIn) endIn.min = o.date;
+      if (o.endDate && o.endDate < o.date) { o.endDate = o.date; if (endIn) endIn.value = o.endDate; }
+    } else if (t.classList.contains('ov-end')) {
+      o.endDate = t.value || '';
+      if (o.endDate && o.endDate < o.date) { o.endDate = o.date; t.value = o.endDate; }
+    } else if (t.classList.contains('ov-type')) {
       o.type = t.value;
-      const sel = t.closest('.ov-row').querySelector('.ov-set');
-      sel.disabled = o.type !== 'set';
-    }
-    else if (t.classList.contains('ov-set')) o.setId = t.value;
+      card.querySelector('.ov-set').disabled = o.type !== 'set';
+    } else if (t.classList.contains('ov-set')) o.setId = t.value;
+    else return; // 名称由 input 事件处理
+    refreshOvHead(o);
     saveSchedulesSoon();
   });
   ovBox.addEventListener('click', async (e) => {
+    const toggle = e.target.closest('.ov-toggle');
+    if (toggle) {
+      const card = toggle.closest('.ov-card');
+      const o = (state.schedules.overrides || []).find(x => x.id === card.dataset.id);
+      if (!o) return;
+      o.collapsed = !o.collapsed;
+      card.classList.toggle('collapsed', o.collapsed);
+      saveSchedulesSoon();
+      return;
+    }
     const del = e.target.closest('.del-ov');
     if (!del) return;
-    state.schedules.overrides.splice(Number(del.dataset.idx), 1);
+    const o = findOv(del);
+    if (!o) return;
+    const ok = await confirmDialog({ title: '删除特殊日期', message: `确定删除「${esc(ovLabelOf(o))}」吗？`, okText: '删除', danger: true });
+    if (!ok) return;
+    state.schedules.overrides = state.schedules.overrides.filter(x => x.id !== o.id);
     renderOverrides(); saveSchedulesSoon();
   });
 }
@@ -858,25 +956,93 @@ function renderSets() {
   box.innerHTML = state.schedules.sets.map(setCard).join('');
 }
 
-function renderOverrides() {
+function ovSummaryOf(o) {
+  const set = (state.schedules.sets || []).find(s => s.id === o.setId);
+  const bits = [fmtOvRange(o)];
+  bits.push(o.type === 'set' ? (set ? `方案：${set.name}` : '方案未设置') : '全天不打铃');
+  return bits.join(' · ');
+}
+
+function ovCardHtml(o, focusId) {
+  const typeTxt = o.type === 'holiday' ? '假期（不打铃）' : '使用指定方案';
+  const setOpts = (state.schedules.sets || []).map(s =>
+    `<option value="${esc(s.id)}" ${o.setId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  const id = esc(o.id);
+  return `<div class="card ov-card ${o.collapsed ? 'collapsed' : ''}" data-id="${id}" ${o.id === focusId ? 'data-new="1"' : ''}>
+    <div class="ov-head">
+      <button class="ov-toggle" data-id="${id}" title="${o.collapsed ? '展开' : '收起'}" aria-label="展开或收起">${icon('chevron')}</button>
+      <div class="ov-head-main">
+        <div class="ov-title">${esc(ovLabelOf(o))}</div>
+        <div class="ov-sub">${esc(ovSummaryOf(o))}</div>
+      </div>
+      <span class="ov-badge ${o.type === 'holiday' ? 'holiday' : 'set'}">${typeTxt}</span>
+      <button class="icon-btn danger del-ov" data-id="${id}" title="删除">${icon('trash')}</button>
+    </div>
+    <div class="ov-body">
+      <div class="ov-fields">
+        <label class="ov-f-name">名称<input class="ov-name" data-id="${id}" maxlength="30" value="${esc(o.name)}" placeholder="自定义名称，如：期中考试周"></label>
+        <label>开始日期<input type="date" class="ov-date" data-id="${id}" value="${esc(o.date)}"></label>
+        <label>结束日期<input type="date" class="ov-end" data-id="${id}" value="${esc(o.endDate || '')}" min="${esc(o.date)}" title="留空表示仅开始日期当天"></label>
+        <label>安排<select class="ov-type" data-id="${id}">
+          <option value="holiday" ${o.type === 'holiday' ? 'selected' : ''}>假期（不打铃）</option>
+          <option value="set" ${o.type === 'set' ? 'selected' : ''}>使用指定方案</option>
+        </select></label>
+        <label>方案<select class="ov-set" data-id="${id}" ${o.type !== 'set' ? 'disabled' : ''}>
+          ${setOpts || '<option value="">（暂无方案）</option>'}
+        </select></label>
+      </div>
+      <div class="ov-hint">结束日期留空即为单日；填写后范围内每天生效（含首尾两天）。同一天有多条时，单日记录优先。</div>
+    </div>
+  </div>`;
+}
+
+/* 整个「特殊日期」容器的一键收起 / 展开（状态存 settings.json，重启后保持） */
+function updateOvContainerSummary() {
+  const el = $('#ov-container-summary');
+  if (!el) return;
+  const n = (state.schedules.overrides || []).length;
+  el.textContent = state.settings && state.settings.ovCollapsed ? `共 ${n} 条 · 已收起` : `共 ${n} 条`;
+}
+function setOvContainerCollapsed(collapsed, persist = true) {
+  state.settings.ovCollapsed = !!collapsed;
+  const card = $('#overrides-card'), head = $('#ov-container-toggle');
+  if (card) card.classList.toggle('collapsed', state.settings.ovCollapsed);
+  if (head) {
+    head.setAttribute('aria-expanded', String(!state.settings.ovCollapsed));
+    head.title = state.settings.ovCollapsed ? '点击展开特殊日期' : '点击收起特殊日期';
+  }
+  const hint = $('#ov-container-hint');
+  if (hint) hint.textContent = state.settings.ovCollapsed ? '点击展开' : '点击收起';
+  updateOvContainerSummary();
+  if (persist) saveSettingsSoon();
+}
+/* 需要让用户立刻看到结果的操作，自动把容器展开 */
+function ensureOvContainerOpen() {
+  if (state.settings.ovCollapsed) setOvContainerCollapsed(false);
+}
+
+function renderOverrides(focusId) {
   const box = $('#overrides-list');
   const ovs = state.schedules.overrides || [];
+  updateOvContainerSummary();
+  const toggleAll = $('#btn-ov-toggle-all');
+  if (toggleAll) toggleAll.textContent = ovs.length && ovs.every(o => o.collapsed) ? '全部展开' : '全部收起';
   if (!ovs.length) {
-    box.innerHTML = '<div class="ov-note" style="padding:4px 0 12px">暂无特殊日期。可将某个日期设为「假期」（全天不打铃）或「使用指定方案」（如考试周、运动会）。</div>';
+    box.innerHTML = '<div class="ov-note" style="padding:4px 0 12px">暂无特殊日期。可添加单日或<b>日期范围</b>并自定义名称，例如「期中考试周」，设为假期（全天不打铃）或使用指定方案。</div>';
     return;
   }
-  box.innerHTML = ovs.map((o, i) => `
-    <div class="ov-row">
-      <input type="date" class="ov-date" data-idx="${i}" value="${o.date}">
-      <select class="ov-type" data-idx="${i}">
-        <option value="holiday" ${o.type === 'holiday' ? 'selected' : ''}>假期（不打铃）</option>
-        <option value="set" ${o.type === 'set' ? 'selected' : ''}>使用指定方案</option>
-      </select>
-      <select class="ov-set" data-idx="${i}" ${o.type !== 'set' ? 'disabled' : ''}>
-        ${state.schedules.sets.map(s => `<option value="${s.id}" ${o.setId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
-      </select>
-      <button class="icon-btn danger del-ov" data-idx="${i}" title="删除">${icon('trash')}</button>
-    </div>`).join('');
+  box.innerHTML = ovs.map(o => ovCardHtml(o, focusId)).join('');
+}
+
+/* 编辑字段后只刷新卡片头部，不重绘整个列表（保留输入焦点与折叠状态） */
+function refreshOvHead(o) {
+  const card = document.querySelector(`.ov-card[data-id="${CSS.escape(o.id)}"]`);
+  if (!card) return;
+  card.querySelector('.ov-title').textContent = ovLabelOf(o);
+  card.querySelector('.ov-sub').textContent = ovSummaryOf(o);
+  const badge = card.querySelector('.ov-badge');
+  badge.textContent = o.type === 'holiday' ? '假期（不打铃）' : '使用指定方案';
+  badge.className = 'ov-badge ' + (o.type === 'holiday' ? 'holiday' : 'set');
 }
 
 /* 法定节假日模板（依据国务院办公厅公布的放假安排整理；如有出入以官方通知为准，导入后可在上方列表手动增删） */
@@ -903,18 +1069,18 @@ function fmtHolRange(dates) {
   return dates.length === 1 ? f(dates[0]) : `${f(dates[0])} ~ ${f(dates[dates.length - 1])}（${dates.length} 天）`;
 }
 
-/* 导入节假日模板：写入特殊日期（假期类型），已存在的日期跳过 */
+/* 导入节假日模板：每个节日写成一条带名称的日期范围（假期类型），同名范围跳过 */
 async function importHolidays() {
   const years = [...new Set(HOLIDAY_TEMPLATES.map(t => t.year))].sort();
   const detail = years.map((y) => {
     const items = HOLIDAY_TEMPLATES.filter(t => t.year === y);
     const total = items.reduce((a, t) => a + t.dates.length, 0);
-    return `<div class="hol-year">${y} 年 · 共 ${total} 天</div>` +
+    return `<div class="hol-year">${y} 年 · ${items.length} 组 / 共 ${total} 天</div>` +
       items.map(t => `<div class="hol-item"><b>${t.name}</b><span>${fmtHolRange(t.dates)}</span></div>`).join('');
   }).join('');
   const ov = openModal(`<h3>导入法定节假日模板</h3>
     <div class="modal-body">
-      <p class="hol-tip">导入后对应日期全天不打铃；已存在的日期自动跳过。日期如与实际放假安排有出入，导入后可在「特殊日期」中手动调整。</p>
+      <p class="hol-tip">导入后按每个节日生成一条可收起的<b>日期范围</b>卡片（带名称），范围内每天全天不打铃；已存在的同名范围自动跳过。日期如与实际放假安排有出入，导入后可在「特殊日期」中修改名称、起止日期或安排。</p>
       ${detail}
     </div>
     <div class="modal-btns">
@@ -928,17 +1094,27 @@ async function importHolidays() {
     });
   });
   if (!choice) return;
-  const ovs = state.schedules.overrides || (state.schedules.overrides = []);
-  let added = 0;
+  let ovs = state.schedules.overrides || (state.schedules.overrides = []);
+  let added = 0, merged = 0;
   for (const t of HOLIDAY_TEMPLATES) {
-    for (const d of t.dates) {
-      if (!ovs.some(o => o.date === d)) { ovs.push({ date: d, type: 'holiday' }); added++; }
+    const start = t.dates[0], end = t.dates[t.dates.length - 1];
+    const name = `${t.year}年${t.name}`;
+    if (ovs.some(o => o.date === start && ovEndOf(o) === end && (o.name || '') === name)) continue;
+    // 兼容旧版本导入的「一天一条、无名称」记录：完全落在本范围内的合并进新卡片
+    const legacy = ovs.filter(o => !o.name && o.type === 'holiday' && ovIsSingle(o) && o.date >= start && o.date <= end);
+    if (legacy.length) {
+      const ids = new Set(legacy.map(o => o.id));
+      state.schedules.overrides = ovs = ovs.filter(o => !ids.has(o.id));
+      merged += legacy.length;
     }
+    ovs.push({ id: uid(), name, date: start, endDate: end === start ? '' : end, type: 'holiday', setId: null, collapsed: true });
+    added++;
   }
-  ovs.sort((a, b) => a.date < b.date ? -1 : 1);
+  sortOverrides();
   await bellApi.schedules.save(state.schedules);
+  if (added) ensureOvContainerOpen();
   renderOverrides();
-  toast(added ? `已导入 ${added} 天法定节假日` : '假期日期均已存在，无需导入', 'success');
+  toast(added ? `已导入 ${added} 组节假日${merged ? `，合并 ${merged} 条旧记录` : ''}` : '这些节假日已存在，无需导入', 'success');
 }
 
 /* ============================================================
@@ -2118,9 +2294,72 @@ function saveExamSchemesSoon() {
   saveSchemesTimer = setTimeout(() => bellApi.examSchemes.save(state.examSchemes), 350);
 }
 
+/* 载入内置 2026 高考示例：只补齐缺失记录，不覆盖用户已有考试 / 方案 */
+async function loadGaokaoSample() {
+  let sample;
+  try { sample = await bellApi.exams.sample(); }
+  catch { toast('读取内置示例失败', 'error'); return; }
+  const exams = sample.exams || [], schemes = sample.schemes || [];
+  const groups = {};
+  for (const ex of exams) (groups[ex.date] = groups[ex.date] || []).push(ex);
+  const preview = Object.keys(groups).sort().map(d => `
+    <div class="gk-day">
+      <div class="gk-date">${esc(d)}</div>
+      <div class="gk-subjects">${groups[d].map(ex => `
+        <span class="gk-subject"><b>${esc(ex.subject)}</b>${esc(ex.startTime)}–${esc(secToHM(timeToMin(ex.startTime) * 60 + Number(ex.duration) * 60))}</span>`).join('')}</div>
+    </div>`).join('');
+  const ov = openModal(`<h3>载入 2026 年高考示例</h3>
+    <div class="modal-body">
+      <p class="hol-tip">示例按新高考「3+1+2」常见日程整理，共 ${exams.length} 场考试（6 月 7–9 日），并附一套「${esc((schemes[0] || {}).name || '标准播报流程')}」方案。各科时间以本地考试院通知为准，载入后可直接编辑或删除。</p>
+      <div class="gk-preview">${preview}</div>
+      <label class="gk-check"><input type="checkbox" id="gk-add-override" checked><span>同时在特殊日期添加「2026年高考（常规铃声暂停）」范围（6/7–6/9），考试期间暂停常规铃声</span></label>
+      <p class="hol-tip" style="margin:10px 0 0">已存在的考试与方案不会重复添加或被覆盖；示例铃声暂用内置 WAV，可在方案里替换为文字转语音。</p>
+    </div>
+    <div class="modal-btns">
+      <button class="btn ghost" data-r="0">取消</button>
+      <button class="btn" data-r="1">载入示例</button>
+    </div>`);
+  ov.querySelector('.modal').classList.add('modal-gk');
+  const choice = await new Promise((resolve) => {
+    ov.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-r]');
+      if (!b) return;
+      const withOverride = !!(ov.querySelector('#gk-add-override') || {}).checked;
+      closeModal();
+      resolve(b.dataset.r === '1' ? { withOverride } : null);
+    });
+  });
+  if (!choice) return;
+  const exList = state.exams.exams || (state.exams.exams = []);
+  const scList = state.examSchemes.schemes || (state.examSchemes.schemes = []);
+  let nEx = 0, nSc = 0, nOv = 0;
+  for (const sc of schemes) if (!scList.some(x => x.id === sc.id)) { scList.push(sc); nSc++; }
+  for (const ex of exams) if (!exList.some(x => x.id === ex.id)) { exList.push(ex); nEx++; }
+  if (nEx || nSc) {
+    await bellApi.exams.save(state.exams);
+    await bellApi.examSchemes.save(state.examSchemes);
+  }
+  if (choice.withOverride && sample.override) {
+    const src = sample.override;
+    const ovs = state.schedules.overrides || (state.schedules.overrides = []);
+    if (!ovs.some(x => x.id === src.id || (x.name === src.name && x.date === src.date && ovEndOf(x) === src.endDate))) {
+      ovs.push({ ...src, id: ovs.some(x => x.id === src.id) ? uid() : src.id });
+      sortOverrides();
+      await bellApi.schedules.save(state.schedules);
+      renderOverrides();
+      nOv = 1;
+    }
+  }
+  renderExams();
+  toast(nEx || nSc || nOv
+    ? `已载入 ${nEx} 场考试、${nSc} 套方案${nOv ? '、1 条特殊日期' : ''}`
+    : '示例已全部存在，无需重复载入', 'success');
+}
+
 function bindExamPage() {
   $('#btn-add-exam').addEventListener('click', () => openExamEditor(null));
   $('#btn-manage-schemes').addEventListener('click', () => openSchemeManager());
+  $('#btn-load-gaokao').addEventListener('click', loadGaokaoSample);
   $('#exams-list').addEventListener('change', (e) => {
     if (!e.target.classList.contains('exam-enabled')) return;
     const ex = state.exams.exams.find(x => x.id === e.target.dataset.id);
@@ -2150,7 +2389,7 @@ function renderExams() {
   const exams = [...(state.exams.exams || [])].sort((a, b) =>
     (a.date + String(a.startTime)).localeCompare(b.date + String(b.startTime)));
   if (!exams.length) {
-    list.innerHTML = `<div class="empty"><div class="empty-ico">${icon('filetext')}</div><div>暂无考试播报安排，点击右上角「添加考试」配置</div></div>`;
+    list.innerHTML = `<div class="empty"><div class="empty-ico">${icon('filetext')}</div><div>暂无考试播报安排，点击右上角「添加考试」配置，或「载入高考示例」快速体验</div></div>`;
     return;
   }
   list.innerHTML = exams.map(examCard).join('');

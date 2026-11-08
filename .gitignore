@@ -4,6 +4,7 @@ node_modules/
 # 打包输出
 dist/
 dist2/
+dist3/
 
 # 本地工具 / IDE
 .npm-shim/

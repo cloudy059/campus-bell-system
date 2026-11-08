@@ -90,13 +90,21 @@
             <h2>铃声方案</h2>
             <button class="btn primary" id="btn-add-set">＋ 新建方案</button>
           </div>
-          <p class="page-tip">系统按「星期几」自动匹配启用的方案；特殊日期（假期 / 考试周）可单独调整。修改即时自动保存。</p>
-          <div class="card overrides-card">
-            <div class="card-title">特殊日期</div>
-            <div id="overrides-list"></div>
-            <div class="ov-actions">
-              <button class="btn ghost sm" id="btn-add-override">＋ 添加特殊日期</button>
-              <button class="btn ghost sm" id="btn-import-holidays">导入节假日模板</button>
+          <p class="page-tip">系统按「星期几」自动匹配启用的方案；特殊日期可选单日或<b>日期范围</b>、自定义名称，整块「特殊日期」可一键收起。同一天有多条时单日记录优先。修改即时自动保存。</p>
+          <div class="card overrides-card" id="overrides-card">
+            <div class="ov-container-head" id="ov-container-toggle" role="button" tabindex="0" aria-expanded="true" title="点击收起 / 展开特殊日期">
+              <span class="ov-container-caret" id="ov-container-caret"></span>
+              <span class="card-title">特殊日期</span>
+              <span class="ov-container-summary" id="ov-container-summary">共 0 条</span>
+              <span class="ov-container-hint" id="ov-container-hint">点击收起</span>
+            </div>
+            <div class="ov-container-body" id="ov-container-body">
+              <div id="overrides-list"></div>
+              <div class="ov-actions">
+                <button class="btn ghost sm" id="btn-add-override">＋ 添加特殊日期</button>
+                <button class="btn ghost sm" id="btn-import-holidays">导入节假日模板</button>
+                <button class="btn ghost sm" id="btn-ov-toggle-all">全部收起</button>
+              </div>
             </div>
           </div>
           <div id="sets-list"></div>
@@ -107,11 +115,12 @@
           <div class="page-head">
             <h2>考试播报</h2>
             <div class="head-actions">
+              <button class="btn ghost" id="btn-load-gaokao">载入高考示例</button>
               <button class="btn ghost" id="btn-manage-schemes">播报节点方案</button>
               <button class="btn primary" id="btn-add-exam">＋ 添加考试</button>
             </div>
           </div>
-          <p class="page-tip">考试的播报节点统一在「播报节点方案」中维护，每个节点可选择触发时机（开考前、结束前、开始考试、考试结束）并从铃声库选择铃声（音乐或语音均可）；可创建多套方案，添加考试时选一套即可作用于该考试，不使用方案的考试不播报。语音请先在「铃声库 → 文字转语音」中生成。考试播报独立于临时静音，到点必定播报。</p>
+          <p class="page-tip">首次运行已内置「2026 年高考」示例考试与标准播报方案（6 月 7–9 日，可自行修改或删除，也可点「载入高考示例」重新导入）。播报节点统一在「播报节点方案」中维护，每个节点可选择触发时机（开考前、结束前、开始考试、考试结束）并从铃声库选择铃声（音乐或语音均可）；可创建多套方案，添加考试时选一套即可作用于该考试，不使用方案的考试不播报。语音请先在「铃声库 → 文字转语音」中生成。考试播报独立于临时静音，到点必定播报。</p>
           <div id="exams-list"></div>
         </section>
 
