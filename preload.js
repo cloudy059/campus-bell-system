@@ -20,7 +20,18 @@ contextBridge.exposeInMainWorld('bellApi', {
     download: (song) => ipcRenderer.invoke('online:download', song),
     playlist: (input) => ipcRenderer.invoke('online:playlist', input),
     daily: () => ipcRenderer.invoke('online:daily'),
-    discover: () => ipcRenderer.invoke('online:discover')
+    discover: () => ipcRenderer.invoke('online:discover'),
+    hotSearch: () => ipcRenderer.invoke('online:hotSearch'),
+    toplists: () => ipcRenderer.invoke('online:toplists'),
+    newSongs: (area) => ipcRenderer.invoke('online:newSongs', area),
+    auth: () => ipcRenderer.invoke('online:auth'),
+    authRefresh: () => ipcRenderer.invoke('online:authRefresh'),
+    loginQrStart: () => ipcRenderer.invoke('online:loginQrStart'),
+    loginQrCheck: (key) => ipcRenderer.invoke('online:loginQrCheck', key),
+    loginSendCode: (phone) => ipcRenderer.invoke('online:loginSendCode', phone),
+    loginPhone: (payload) => ipcRenderer.invoke('online:loginPhone', payload),
+    loginCookie: (raw) => ipcRenderer.invoke('online:loginCookie', raw),
+    logout: () => ipcRenderer.invoke('online:logout')
   },
   schedules: {
     load: () => ipcRenderer.invoke('schedules:load'),

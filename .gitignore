@@ -11,6 +11,9 @@ dist2/
 .trae-html-share-packages/
 .vscode/
 .idea/
+# WorkBuddy 本地工作记录（含调试日志与本机路径，不公开到仓库）
+.workbuddy/
+.screenshots/
 
 # 构建日志与临时文件
 .build-log.txt

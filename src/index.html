@@ -139,41 +139,97 @@
 
           <!-- 在线音乐视图（网易云音乐，下载入库后本地播放） -->
           <div id="music-online" class="hidden">
-            <p class="page-tip">在线音乐来自网易云音乐，下载后保存到本地铃声库，铃声播放不依赖网络。VIP 歌曲未登录时可能仅能下载试听片段（约 30 秒，一般足够铃声使用）。</p>
-            <div class="ol-two-col">
-              <div class="card">
-                <div class="online-search-row">
-                  <input class="modal-input" id="ol-kw" type="text" maxlength="60" placeholder="输入歌曲 / 歌手名，回车搜索…">
-                  <button class="btn" id="ol-search-btn">搜索歌曲</button>
-                </div>
+            <p class="page-tip">在线音乐来自网易云音乐，下载后保存到本地铃声库，铃声播放不依赖网络。登录账号后可下载 VIP 歌曲完整版；未登录时 VIP 歌曲通常只能取到约 30 秒试听片段。</p>
+            <div class="card nc-account">
+              <div class="nc-avatar" id="nc-avatar"><span>♪</span></div>
+              <div class="nc-info">
+                <div class="nc-name" id="nc-name">未登录网易云账号</div>
+                <div class="nc-sub" id="nc-sub">登录后可下载 VIP 歌曲完整版；登录信息仅保存在本机，不参与备份</div>
               </div>
-              <div class="card">
-                <div class="online-search-row">
-                  <input class="modal-input" id="ol-pl" type="text" maxlength="120" placeholder="粘贴网易云音乐歌单链接或 ID，批量下载到本地…">
+              <div class="nc-actions">
+                <button class="btn sm ghost" id="nc-refresh" title="重新校验登录状态">刷新状态</button>
+                <button class="btn sm ghost hidden" id="nc-logout">退出登录</button>
+                <button class="btn sm" id="nc-login">账号登录</button>
+              </div>
+            </div>
+
+            <!-- 常驻工具条：搜索 + 歌单导入 + 音质（SPlayer 顶部常驻搜索） -->
+            <div class="card ol-tools">
+              <div class="ol-tool-row">
+                <div class="ol-field ol-field-wide">
+                  <input class="modal-input" id="ol-kw" type="text" maxlength="60" placeholder="搜索歌曲 / 歌手 / 专辑，回车搜索…">
+                  <button class="btn" id="ol-search-btn">搜索</button>
+                </div>
+                <div class="ol-field ol-field-wide">
+                  <input class="modal-input" id="ol-pl" type="text" maxlength="120" placeholder="粘贴网易云歌单链接或 ID…">
                   <button class="btn" id="ol-pl-btn">导入歌单</button>
                 </div>
+                <div class="ol-field ol-field-narrow">
+                  <label class="ol-field-label" for="ol-level">下载音质</label>
+                  <select class="modal-input" id="ol-level" title="无对应音质时自动使用最高可用音质">
+                    <option value="standard">标准</option>
+                    <option value="higher">较高</option>
+                    <option value="exhigh" selected>极高</option>
+                    <option value="lossless">无损</option>
+                  </select>
+                </div>
               </div>
+              <div class="ol-hot" id="ol-hot"><span class="ol-hot-label">热搜</span><span id="ol-hot-words" class="ol-hot-words">加载中…</span></div>
             </div>
-            <div class="card">
-              <div class="ol-quick">
-                <button class="btn ghost" id="ol-daily">个性推荐</button>
-                <button class="btn ghost" id="ol-discover">发现音乐</button>
+
+            <!-- 发现区：分段 Tab + 卡片网格 -->
+            <div class="card ol-discover">
+              <div class="ol-head">
+                <div class="card-title">发现音乐</div>
+                <div class="ol-seg" id="ol-seg">
+                  <button class="btn sm ghost on" data-view="playlists">推荐歌单</button>
+                  <button class="btn sm ghost" data-view="toplists">排行榜</button>
+                  <button class="btn sm ghost" data-view="new">新歌速递</button>
+                  <button class="btn sm ghost" data-view="daily">个性推荐</button>
+                </div>
+                <button class="btn sm ghost" id="ol-refresh-view" title="刷新当前板块">刷新</button>
               </div>
-              <div class="ol-pls hidden" id="ol-pls"></div>
+              <div class="ol-filters hidden" id="ol-area-row">
+                <span class="ol-filters-label">地区</span>
+                <button class="btn sm ghost on" data-area="all">全部</button>
+                <button class="btn sm ghost" data-area="zh">华语</button>
+                <button class="btn sm ghost" data-area="ea">欧美</button>
+                <button class="btn sm ghost" data-area="kr">韩国</button>
+                <button class="btn sm ghost" data-area="jp">日本</button>
+              </div>
+              <div class="ol-cards" id="ol-cards"></div>
+              <div class="ol-more hidden" id="ol-more"><button class="btn sm ghost" id="ol-more-btn">显示更多榜单</button></div>
+              <div class="ol-view-status" id="ol-view-status"></div>
             </div>
-            <div class="card table-card">
+
+            <!-- 结果区：详情条 + 批量操作栏 + 歌曲列表 -->
+            <div class="card table-card ol-result-card">
               <div class="card-title-row">
                 <div class="card-title" id="ol-result-title">搜索结果</div>
                 <div class="ol-toolbar">
                   <span class="ol-info" id="ol-pl-info"></span>
-                  <button class="btn sm ghost hidden" id="ol-dl-all">批量下载</button>
+                  <button class="btn sm ghost hidden" id="ol-more-songs">加载更多结果</button>
                 </div>
               </div>
-              <table class="data-table">
-                <thead><tr><th>歌曲</th><th>歌手</th><th>时长</th><th class="ta-r">操作</th></tr></thead>
+              <div class="ol-detail hidden" id="ol-detail"></div>
+              <div class="ol-batch">
+                <span class="ol-selected" id="ol-selected">已选 0 首</span>
+                <div class="ol-batch-actions">
+                  <button class="btn sm ghost" id="ol-clear-sel">清空选择</button>
+                  <button class="btn sm" id="ol-dl-sel">下载选中</button>
+                  <button class="btn sm ghost hidden" id="ol-dl-all">下载全部</button>
+                </div>
+                <span class="ol-status" id="ol-progress"></span>
+              </div>
+              <table class="data-table ol-table">
+                <thead><tr>
+                  <th class="col-check"><input type="checkbox" id="ol-check-all" title="全选 / 取消全选"></th>
+                  <th class="col-no">#</th>
+                  <th>歌曲</th><th>歌手</th><th>专辑</th><th>时长</th><th class="ta-r">操作</th>
+                </tr></thead>
                 <tbody id="ol-body"></tbody>
               </table>
-              <div class="empty small hidden" id="ol-empty">输入关键词搜索，或粘贴歌单链接导入</div>
+              <div class="empty small hidden" id="ol-empty">输入关键词搜索、粘贴歌单，或点击上方歌单 / 榜单卡片载入曲目</div>
             </div>
           </div>
         </section>
@@ -249,7 +305,7 @@
                 <label class="switch"><input type="checkbox" id="set-autolaunch"><span class="slider"></span></label>
               </div>
               <div class="form-row switch-row">
-                <label>运行时阻止电脑休眠<br><small>防止休眠导致铃声漏播；屏幕仍会正常关闭</small></label>
+                <label>运行时阻止电脑休眠<br><small>防止休眠导致铃声漏播；开启期间屏幕不会自动熄灭</small></label>
                 <label class="switch"><input type="checkbox" id="set-keepawake"><span class="slider"></span></label>
               </div>
               <div class="form-row switch-row">

@@ -1,7 +1,7 @@
 {
   "name": "campus-bell-system",
   "productName": "校园音乐铃声系统",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "校园自动音乐铃声播放系统 - 按作息时间自动播放铃声，支持多方案、音乐库与播放日志",
   "main": "main.js",
   "author": "Campus Bell",

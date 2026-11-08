@@ -106,7 +106,14 @@ async function init() {
   try { const lg = await bellApi.logs.load(); state.logs = lg || { entries: [] }; } catch { /* ignore */ }
   try { state.appInfo = await bellApi.app.info(); } catch { /* ignore */ }
   // 同步防休眠状态：主进程启动时已按设置开启，此处确保渲染端与主进程一致
-  try { if ((state.appInfo.keepAwake || false) !== (state.settings.keepAwake !== false)) bellApi.app.setKeepAwake(state.settings.keepAwake !== false); } catch { /* ignore */ }
+  // appInfo.keepAwake 是主进程真实状态，设置页开关以它为准，避免「配置已开、实际未生效」被误显示为已开启
+  try {
+    const want = state.settings.keepAwake !== false;
+    if ((state.appInfo.keepAwake || false) !== want) {
+      await bellApi.app.setKeepAwake(want);
+      state.appInfo.keepAwake = want;
+    }
+  } catch { /* ignore */ }
 
   await populateOutputs();
   applyOutputDevice();
@@ -118,6 +125,7 @@ async function init() {
   updateLibCount();
   startTicker();
   measureMissingDurations();
+  refreshNeteaseAuth(); // 读取已保存的网易云登录态（不阻塞界面）
 }
 
 function injectIcons() {
@@ -961,18 +969,84 @@ function bindMusicPage() {
 
   // 在线音乐（网易云音乐）
   $('#btn-online').addEventListener('click', () => toggleOnlineView($('#music-online').classList.contains('hidden')));
-  $('#ol-search-btn').addEventListener('click', onlineSearch);
-  $('#ol-kw').addEventListener('keydown', (e) => { if (e.key === 'Enter') onlineSearch(); });
-  $('#ol-daily').addEventListener('click', onlineDaily);
-  $('#ol-discover').addEventListener('click', onlineDiscover);
-  $('#ol-pls').addEventListener('click', (e) => {
-    const card = e.target.closest('.ol-pl');
-    if (card) onlineLoadPlaylistById(card.dataset.id);
-  });
+  $('#ol-search-btn').addEventListener('click', () => onlineSearch(false));
+  $('#ol-kw').addEventListener('keydown', (e) => { if (e.key === 'Enter') onlineSearch(false); });
   $('#ol-pl-btn').addEventListener('click', onlineLoadPlaylist);
   $('#ol-pl').addEventListener('keydown', (e) => { if (e.key === 'Enter') onlineLoadPlaylist(); });
-  $('#ol-dl-all').addEventListener('click', onlineDownloadAll);
+  $('#ol-hot-words').addEventListener('click', (e) => {
+    const chip = e.target.closest('.ol-hot-chip');
+    if (!chip) return;
+    if (chip.id === 'ol-hot-retry') { loadHotSearch(); return; }
+    $('#ol-kw').value = chip.dataset.kw;
+    onlineSearch(false);
+  });
+  $('#ol-seg').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-view]');
+    if (b) switchOnlineView(b.dataset.view);
+  });
+  $('#ol-refresh-view').addEventListener('click', () => onlineLoadView(true));
+  $('#ol-area-row').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-area]');
+    if (!b) return;
+    onlineState.area = b.dataset.area;
+    $$('#ol-area-row .btn').forEach(x => x.classList.toggle('on', x === b));
+    onlineLoadView(false);
+  });
+  $('#ol-cards').addEventListener('click', (e) => {
+    const c = e.target.closest('[data-pl]');
+    if (c) onlineLoadPlaylistById(c.dataset.pl, c.dataset.name);
+  });
+  $('#ol-more-btn').addEventListener('click', () => {
+    onlineState.topExpanded = true;
+    renderCards('toplists', onlineState.cache.toplists || {});
+  });
+  $('#ol-more-songs').addEventListener('click', () => onlineSearch(true));
+  $('#ol-dl-all').addEventListener('click', () => downloadSongs(onlineState.songs.map(s => s.id)));
+  $('#ol-dl-sel').addEventListener('click', () => downloadSongs([...onlineState.selected]));
+  $('#ol-clear-sel').addEventListener('click', () => {
+    onlineState.selected.clear();
+    $$('#ol-body .ol-sel').forEach(b => { b.checked = false; });
+    updateSelection();
+  });
+  $('#ol-check-all').addEventListener('change', (e) => {
+    $$('#ol-body .ol-sel').filter(b => !b.disabled).forEach(b => {
+      b.checked = e.target.checked;
+      const id = Number(b.dataset.id);
+      if (e.target.checked) onlineState.selected.add(id); else onlineState.selected.delete(id);
+    });
+    updateSelection();
+  });
   $('#ol-body').addEventListener('click', onOnlineRowClick);
+  $('#ol-body').addEventListener('change', (e) => {
+    const box = e.target.closest('.ol-sel');
+    if (!box) return;
+    const id = Number(box.dataset.id);
+    if (box.checked) onlineState.selected.add(id); else onlineState.selected.delete(id);
+    updateSelection();
+  });
+  $('#ol-body').addEventListener('dblclick', (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    if (!tr) return;
+    const sg = onlineState.songs.find(s => Number(s.id) === Number(tr.dataset.id));
+    if (sg) playOnlineSong(sg, null);
+  });
+
+  // 网易云账号
+  $('#nc-login').addEventListener('click', openNeteaseLogin);
+  $('#nc-refresh').addEventListener('click', async () => {
+    toast('正在校验登录状态…', 'info');
+    await refreshNeteaseAuth(true);
+    toast(onlineState.auth && onlineState.auth.loggedIn ? '登录状态有效' : '当前未登录或登录已过期', 'success');
+  });
+  $('#nc-logout').addEventListener('click', async () => {
+    const ok = await confirmDialog({
+      title: '退出网易云账号', okText: '退出登录', danger: true,
+      message: '退出后将恢复匿名访问，VIP 歌曲可能只能下载试听片段。确定退出？'
+    });
+    if (!ok) return;
+    const r = await bellApi.online.logout();
+    if (r && r.ok) { onlineState.auth = r.auth; renderNeteaseAuth(r.auth); toast('已退出网易云账号', 'success'); }
+  });
 
   const grid = $('#music-grid');
   grid.addEventListener('click', async (e) => {
@@ -1304,7 +1378,213 @@ async function clipDialog(m) {
 }
 
 /* ---------- 在线音乐（网易云音乐，下载入库后本地播放） ---------- */
-const onlineState = { songs: [], mode: 'search', busy: false };
+const onlineState = {
+  songs: [], mode: 'search', busy: false, auth: null,
+  view: 'playlists', cache: {}, selected: new Set(),
+  keyword: '', offset: 0, total: 0, hasMore: false,
+  detail: null, area: 'all', topExpanded: false, hotLoaded: false, viewLoaded: false
+};
+
+/* ---------- 网易云账号登录（扫码 / 短信验证码 / Cookie） ---------- */
+function renderNeteaseAuth(a) {
+  onlineState.auth = a || null;
+  const name = $('#nc-name'), sub = $('#nc-sub'), av = $('#nc-avatar'),
+        loginBtn = $('#nc-login'), logoutBtn = $('#nc-logout');
+  const p = a && a.profile;
+  if (a && a.loggedIn && p) {
+    name.innerHTML = `${esc(p.nickname || '网易云用户')}${p.vip ? '<span class="nc-vip">VIP</span>' : ''}`;
+    sub.textContent = '已登录 · 可下载 VIP 歌曲完整版；登录信息仅保存在本机';
+    av.innerHTML = p.avatar ? `<img src="${esc(p.avatar)}" alt="" onerror="this.style.display='none'">` : '<span>♪</span>';
+    loginBtn.textContent = '切换账号';
+    logoutBtn.classList.remove('hidden');
+  } else {
+    name.textContent = '未登录网易云账号';
+    sub.textContent = a && a.expired
+      ? '登录已过期，请重新登录；登录信息仅保存在本机，不参与备份'
+      : (a && a.checked === false
+          ? '登录态暂未校验（网络异常），可点「刷新状态」重试'
+          : '登录后可下载 VIP 歌曲完整版；登录信息仅保存在本机，不参与备份');
+    av.innerHTML = '<span>♪</span>';
+    loginBtn.textContent = '账号登录';
+    logoutBtn.classList.add('hidden');
+  }
+}
+
+async function refreshNeteaseAuth(live) {
+  try {
+    const a = await (live ? bellApi.online.authRefresh() : bellApi.online.auth());
+    renderNeteaseAuth(a);
+  } catch { renderNeteaseAuth(null); }
+}
+
+let ncQrTimer = null;
+function stopNcQrPolling() { if (ncQrTimer) { clearInterval(ncQrTimer); ncQrTimer = null; } }
+
+function onNeteaseLoginSuccess(auth) {
+  renderNeteaseAuth(auth);
+  toast('已登录网易云账号：' + ((auth && auth.profile && auth.profile.nickname) || ''), 'success');
+}
+
+function openNeteaseLogin() {
+  const ov = openModal(`<h3>登录网易云音乐</h3>
+    <div class="modal-body nc-login">
+      <div class="nc-tabs">
+        <button class="btn sm ghost on nc-tab" data-tab="qr">扫码登录</button>
+        <button class="btn sm ghost nc-tab" data-tab="phone">手机号登录</button>
+        <button class="btn sm ghost nc-tab" data-tab="cookie">Cookie 登录</button>
+      </div>
+      <div class="nc-pane" data-pane="qr">
+        <div class="nc-qr-box"><img id="nc-qr-img" alt="登录二维码"></div>
+        <div class="nc-qr-status" id="nc-qr-status">正在生成二维码…</div>
+        <div class="nc-center"><button class="btn sm ghost" id="nc-qr-refresh">重新生成二维码</button></div>
+        <p class="nc-hint">打开网易云音乐 App →「扫一扫」→ 在手机上确认登录。二维码约 3 分钟内有效。</p>
+      </div>
+      <div class="nc-pane hidden" data-pane="phone">
+        <input class="modal-input" id="nc-phone" maxlength="11" inputmode="numeric" placeholder="11 位手机号">
+        <div class="nc-code-row">
+          <input class="modal-input" id="nc-code" maxlength="6" inputmode="numeric" placeholder="短信验证码">
+          <button class="btn" id="nc-send-code">发送验证码</button>
+        </div>
+        <div class="nc-qr-status hidden" id="nc-phone-status"></div>
+        <button class="btn primary" id="nc-phone-login">登录</button>
+        <p class="nc-hint">短信登录受网易风控影响较大。若提示被拦截、登录失败或验证码错误，请改用「扫码登录」或「Cookie 登录」——这两种方式不受短信风控限制。</p>
+      </div>
+      <div class="nc-pane hidden" data-pane="cookie">
+        <textarea class="modal-input nc-cookie" id="nc-cookie" placeholder="粘贴从 music.163.com 复制的完整 Cookie（需包含 MUSIC_U）"></textarea>
+        <button class="btn primary" id="nc-cookie-login">验证并登录</button>
+        <p class="nc-hint">浏览器登录 music.163.com → F12 → Network → 任意请求 → 复制 Cookie 请求头。Cookie 仅保存在本机。</p>
+      </div>
+    </div>
+    <div class="modal-btns"><button class="btn ghost" data-r="0">关闭</button></div>`);
+
+  const statusEl = ov.querySelector('#nc-qr-status');
+  const setStatus = (text, cls) => {
+    statusEl.textContent = text;
+    statusEl.className = 'nc-qr-status' + (cls ? ' ' + cls : '');
+  };
+
+  // 弹窗被任何途径关闭（按钮 / Esc / 点击遮罩）时停止扫码轮询
+  const mo = new MutationObserver(() => {
+    if (!$('#modal-root').firstElementChild) { stopNcQrPolling(); mo.disconnect(); }
+  });
+  mo.observe($('#modal-root'), { childList: true });
+  ov.addEventListener('click', (e) => { if (e.target.closest('[data-r="0"]')) closeModal(); });
+  ov.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+  async function startQr() {
+    stopNcQrPolling();
+    setStatus('正在生成二维码…');
+    ov.querySelector('#nc-qr-img').removeAttribute('src');
+    let r;
+    try { r = await bellApi.online.loginQrStart(); }
+    catch { setStatus('二维码获取失败，请稍后重试', 'err'); return; }
+    if (!r || !r.ok) { setStatus((r && r.error) || '二维码生成失败', 'err'); return; }
+    ov.querySelector('#nc-qr-img').src = r.qrimg;
+    setStatus('请使用网易云音乐 App 扫码');
+    let tries = 0, errors = 0;
+    ncQrTimer = setInterval(async () => {
+      if (++tries > 120) { stopNcQrPolling(); setStatus('二维码已超时，请重新生成', 'err'); return; }
+      let c;
+      try { c = await bellApi.online.loginQrCheck(r.key); }
+      catch { c = { status: 'error', error: '网络异常' }; }
+      if (!c) return;
+      if (c.status === 'success') {
+        stopNcQrPolling();
+        onNeteaseLoginSuccess(c.auth);
+        closeModal();
+        return;
+      }
+      if (c.status === 'scanned') { errors = 0; setStatus('已扫码，请在手机上确认登录…'); }
+      else if (c.status === 'expired') { stopNcQrPolling(); setStatus('二维码已过期，请重新生成', 'err'); }
+      else if (c.status === 'error') {
+        if (++errors >= 3) { stopNcQrPolling(); setStatus(c.error || '状态查询失败，请重新生成二维码', 'err'); }
+      } else { errors = 0; setStatus('等待扫码…'); }
+    }, 1500);
+  }
+
+  ov.querySelector('.nc-tabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('.nc-tab');
+    if (!tab) return;
+    const t = tab.dataset.tab;
+    ov.querySelectorAll('.nc-tab').forEach(b => b.classList.toggle('on', b === tab));
+    ov.querySelectorAll('.nc-pane').forEach(p => p.classList.toggle('hidden', p.dataset.pane !== t));
+    if (t === 'qr') startQr(); else stopNcQrPolling();
+  });
+
+  ov.querySelector('#nc-qr-refresh').addEventListener('click', startQr);
+
+  // 手机号登录的失败原因必须常驻显示：toast 一闪而过，用户看不到网易返回的错误码
+  const phoneStatus = ov.querySelector('#nc-phone-status');
+  const setPhoneStatus = (text, cls) => {
+    phoneStatus.textContent = text || '';
+    phoneStatus.className = 'nc-qr-status' + (text ? '' : ' hidden') + (cls ? ' ' + cls : '');
+  };
+  let sendTimer = null;
+  function startSendCooldown() {
+    if (sendTimer) clearInterval(sendTimer);
+    let left = 60;
+    const btn = ov.querySelector('#nc-send-code');
+    btn.disabled = true;
+    btn.textContent = `重新发送 (${left}s)`;
+    sendTimer = setInterval(() => {
+      if (!ov.isConnected) { clearInterval(sendTimer); sendTimer = null; return; }
+      if (--left <= 0) {
+        clearInterval(sendTimer); sendTimer = null;
+        btn.disabled = false; btn.textContent = '发送验证码';
+      } else btn.textContent = `重新发送 (${left}s)`;
+    }, 1000);
+  }
+
+  ov.querySelector('#nc-send-code').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const phone = ov.querySelector('#nc-phone').value.trim();
+    if (!/^1\d{10}$/.test(phone)) { setPhoneStatus('请输入 11 位中国大陆手机号', 'err'); return; }
+    btn.disabled = true;
+    btn.textContent = '发送中…';
+    setPhoneStatus('正在发送验证码…');
+    let r;
+    try { r = await bellApi.online.loginSendCode(phone); }
+    catch { r = { ok: false, error: '发送失败，请检查网络' }; }
+    if (r && r.ok) {
+      setPhoneStatus('验证码已发送，请查收短信', 'ok');
+      toast('验证码已发送，请查收短信', 'success');
+      startSendCooldown();
+    } else {
+      btn.disabled = false;
+      btn.textContent = '发送验证码';
+      setPhoneStatus((r && r.error) || '发送失败', 'err');
+    }
+  });
+
+  async function submitLogin(btn, call, label, statusFn) {
+    btn.disabled = true;
+    btn.textContent = '处理中…';
+    if (statusFn) statusFn('正在验证…');
+    let r;
+    try { r = await call(); }
+    catch { r = { ok: false, error: '请求失败，请检查网络' }; }
+    btn.disabled = false;
+    btn.textContent = label;
+    if (r && r.ok) { onNeteaseLoginSuccess(r.auth); closeModal(); }
+    else {
+      const msg = (r && r.error) || '登录失败';
+      toast(msg, 'error');
+      if (statusFn) statusFn(msg, 'err');
+    }
+  }
+
+  ov.querySelector('#nc-phone-login').addEventListener('click', (e) => {
+    submitLogin(e.currentTarget, () => bellApi.online.loginPhone({
+      phone: ov.querySelector('#nc-phone').value.trim(),
+      captcha: ov.querySelector('#nc-code').value.trim()
+    }), '登录', setPhoneStatus);
+  });
+  ov.querySelector('#nc-cookie-login').addEventListener('click', (e) => {
+    submitLogin(e.currentTarget, () => bellApi.online.loginCookie(ov.querySelector('#nc-cookie').value), '验证并登录');
+  });
+
+  startQr(); // 默认展示扫码登录
+}
 
 function toggleOnlineView(on) {
   $('#music-online').classList.toggle('hidden', !on);
@@ -1313,101 +1593,256 @@ function toggleOnlineView(on) {
   $('#btn-import').classList.toggle('hidden', on);
   $('#btn-tts').classList.toggle('hidden', on);
   $('#btn-online').classList.toggle('on', on);
-  if (on) setTimeout(() => $('#ol-kw').focus(), 80);
+  if (!on) return;
+  setTimeout(() => $('#ol-kw').focus(), 80);
+  loadHotSearch();
+  if (!onlineState.viewLoaded) { onlineState.viewLoaded = true; onlineLoadView(false); }
 }
 
-async function onlineSearch() {
-  const kw = $('#ol-kw').value.trim();
+// 在线接口偶发 DNS 抖动（实测曾出现 getaddrinfo ENOTFOUND music.163.com / 502），
+// 自动重试一次可自愈；失败后也不能把「已加载」标记锁死，否则板块一直空白。
+async function ncRetry(fn, times = 2) {
+  let last = { ok: false, error: '网络异常，请稍后重试' };
+  for (let i = 0; i < times; i++) {
+    try { last = await fn(); } catch { last = { ok: false, error: '网络异常，请稍后重试' }; }
+    if (last && last.ok) return last;
+    if (i < times - 1) await new Promise(r => setTimeout(r, 700));
+  }
+  return last;
+}
+
+const olLevel = () => $('#ol-level').value || 'exhigh';
+function olStatus(text, cls) {
+  const el = $('#ol-view-status');
+  el.textContent = text || '';
+  el.className = 'ol-view-status' + (cls ? ' ' + cls : '');
+}
+function olProgress(text, cls) {
+  const el = $('#ol-progress');
+  el.textContent = text || '';
+  el.className = 'ol-status' + (cls ? ' ' + cls : '');
+}
+
+/* 把任意来源（搜索 / 歌单 / 榜单 / 推荐 / 新歌）的曲目统一送入结果区 */
+function setOnlineSongs(songs, o) {
+  const list = songs || [];
+  onlineState.songs = list;
+  onlineState.mode = o.mode || 'search';
+  onlineState.keyword = o.keyword || '';
+  onlineState.offset = o.offset || 0;
+  onlineState.total = o.total || list.length;
+  onlineState.hasMore = !!o.hasMore;
+  onlineState.detail = o.detail || null;
+  onlineState.selected.clear();
+  $('#ol-result-title').textContent = o.title || '搜索结果';
+  $('#ol-pl-info').textContent = o.info || '';
+  $('#ol-more-songs').classList.toggle('hidden', !onlineState.hasMore);
+  $('#ol-dl-all').classList.toggle('hidden', !(o.batch && list.length));
+  renderDetail(o.detail, o.detailName || o.title);
+  renderOnline();
+  olProgress('', '');
+  if (o.scroll) $('.ol-result-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* 歌单 / 榜单详情条（SPlayer ListDetail 的精简版） */
+function renderDetail(d, name) {
+  const el = $('#ol-detail');
+  if (!d) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const tags = (d.tags || []).map(t => `<span class="ol-tag">${esc(t)}</span>`).join('');
+  el.innerHTML = `
+    ${d.cover ? `<img class="ol-detail-cover" src="${esc(d.cover)}" alt="" onerror="this.style.visibility='hidden'">` : ''}
+    <div class="ol-detail-main">
+      <div class="ol-detail-name">${esc(name || '')}</div>
+      <div class="ol-detail-meta">${[
+        d.creator ? '创建者 ' + esc(d.creator) : '',
+        onlineState.total ? onlineState.total + ' 首' : '',
+        d.playCount ? fmtPlayCount(d.playCount) + ' 次播放' : ''
+      ].filter(Boolean).join(' · ')} ${tags}</div>
+      ${d.description ? `<div class="ol-detail-desc">${esc(d.description)}</div>` : ''}
+    </div>`;
+  el.classList.remove('hidden');
+}
+
+/* 云搜索：首次搜索 / 加载更多共用 */
+async function onlineSearch(append) {
+  const kw = append ? onlineState.keyword : $('#ol-kw').value.trim();
   if (!kw) { toast('请输入搜索关键词', 'info'); return; }
-  $('#ol-result-title').textContent = '正在搜索…';
-  const r = await bellApi.online.search(kw);
+  if (onlineState.busy) return;
+  const offset = append ? onlineState.offset : 0;
+  if (!append) $('#ol-result-title').textContent = '正在搜索…';
+  const r = await ncRetry(() => bellApi.online.search({ keywords: kw, offset, limit: 30 }));
   if (!r || !r.ok) {
-    $('#ol-result-title').textContent = '搜索结果';
+    if (!append) $('#ol-result-title').textContent = '搜索结果';
     toast((r && r.error) || '搜索失败', 'error');
     return;
   }
-  onlineState.songs = r.songs;
-  onlineState.mode = 'search';
-  $('#ol-result-title').textContent = `搜索“${kw.slice(0, 16)}”的结果`;
-  $('#ol-pl-info').textContent = '';
-  $('#ol-dl-all').classList.add('hidden');
-  renderOnline();
+  if (append) {
+    onlineState.songs = onlineState.songs.concat(r.songs);
+    onlineState.offset = r.offset + r.songs.length;
+    onlineState.hasMore = r.hasMore;
+    onlineState.total = r.total;
+    $('#ol-more-songs').classList.toggle('hidden', !r.hasMore);
+    $('#ol-pl-info').textContent = `已显示 ${onlineState.songs.length} / ${r.total} 首`;
+    renderOnline();
+    return;
+  }
+  setOnlineSongs(r.songs, {
+    mode: 'search', keyword: kw, offset: r.offset + r.songs.length,
+    total: r.total, hasMore: r.hasMore,
+    title: `搜索“${kw.slice(0, 16)}”的结果`,
+    info: `共 ${r.total} 首${r.hasMore ? '，可加载更多' : ''}`
+  });
 }
 
-async function onlineLoadPlaylist() {
+function onlineLoadPlaylist() {
   const v = $('#ol-pl').value.trim();
   if (!v) { toast('请粘贴歌单链接或 ID', 'info'); return; }
-  onlineLoadPlaylistById(v);
+  onlineLoadPlaylistById(v, '');
 }
 
-async function onlineLoadPlaylistById(id) {
+async function onlineLoadPlaylistById(id, name) {
   $('#ol-result-title').textContent = '正在获取歌单…';
-  const r = await bellApi.online.playlist(String(id));
+  const r = await ncRetry(() => bellApi.online.playlist(String(id)));
   if (!r || !r.ok) {
     $('#ol-result-title').textContent = '搜索结果';
     toast((r && r.error) || '歌单获取失败', 'error');
     return;
   }
-  onlineState.songs = r.songs;
-  onlineState.mode = 'playlist';
-  $('#ol-result-title').textContent = `歌单：${r.name.slice(0, 24)}`;
-  $('#ol-pl-info').textContent = `共 ${r.total} 首${r.songs.length < r.total ? `，已载入前 ${r.songs.length} 首` : ''}，可批量下载`;
-  $('#ol-dl-all').classList.remove('hidden');
-  renderOnline();
+  setOnlineSongs(r.songs, {
+    mode: 'playlist', title: (name || r.name || '歌单').slice(0, 30),
+    info: `共 ${r.total} 首${r.songs.length < r.total ? `，已载入前 ${r.songs.length} 首` : ''}`,
+    detail: r.detail, detailName: r.name, batch: true, scroll: true
+  });
 }
 
-/* 个性推荐：直接填充结果表（可试听 / 下载 / 批量下载） */
-async function onlineDaily() {
-  const btn = $('#ol-daily');
-  if (btn.disabled) return;
-  btn.disabled = true;
-  $('#ol-result-title').textContent = '正在获取个性推荐…';
-  const r = await bellApi.online.daily();
-  btn.disabled = false;
-  if (!r || !r.ok) {
-    $('#ol-result-title').textContent = '搜索结果';
-    toast((r && r.error) || '获取个性推荐失败', 'error');
+function fmtPlayCount(n) {
+  return n >= 1e8 ? (n / 1e8).toFixed(1) + '亿' : n >= 1e4 ? (n / 1e4).toFixed(1) + '万' : String(n || 0);
+}
+
+async function loadHotSearch() {
+  if (onlineState.hotLoaded) return;
+  const el = $('#ol-hot-words');
+  el.textContent = '加载中…';
+  const r = await ncRetry(() => bellApi.online.hotSearch());
+  if (!r || !r.ok || !r.words.length) {
+    el.innerHTML = '<button class="ol-hot-chip" id="ol-hot-retry">热搜加载失败，点击重试</button>';
+    return; // hotLoaded 保持 false，下次进入页面还能再试
+  }
+  onlineState.hotLoaded = true;
+  el.innerHTML = r.words.map(w =>
+    `<button class="ol-hot-chip ${w.hot ? 'hot' : ''}" data-kw="${esc(w.word)}">${esc(w.word)}</button>`).join('');
+}
+
+function switchOnlineView(v) {
+  onlineState.view = v;
+  $$('#ol-seg .btn').forEach(b => b.classList.toggle('on', b.dataset.view === v));
+  onlineLoadView(false);
+}
+
+/* 发现区四个板块：推荐歌单 / 排行榜 / 新歌速递 / 个性推荐 */
+async function onlineLoadView(force) {
+  const v = onlineState.view;
+  const box = $('#ol-cards');
+  $('#ol-area-row').classList.toggle('hidden', v !== 'new');
+  $('#ol-more').classList.add('hidden');
+  olStatus('', '');
+  if (v === 'new' || v === 'daily') {
+    box.innerHTML = '';
+    box.classList.remove('toplists');
+    if (force) onlineState.cache[v] = null;
+    return v === 'new' ? onlineLoadNewSongs() : onlineDaily();
+  }
+  if (!force && onlineState.cache[v]) {
+    renderCards(v, onlineState.cache[v]);
+    olStatus(v === 'playlists' ? '点击歌单卡片载入曲目，可勾选后批量下载' : '点击榜单卡片载入榜单歌曲', '');
     return;
   }
-  onlineState.songs = r.songs;
-  onlineState.mode = 'daily';
-  $('#ol-result-title').textContent = '个性推荐';
-  $('#ol-pl-info').textContent = `共 ${r.songs.length} 首，可批量下载`;
-  $('#ol-dl-all').classList.remove('hidden');
-  renderOnline();
+  olStatus('加载中…', 'busy');
+  const r = await ncRetry(() => v === 'playlists'
+    ? bellApi.online.discover() : bellApi.online.toplists());
+  if (!r || !r.ok) { box.innerHTML = ''; olStatus((r && r.error) || '加载失败，请点「刷新」重试', 'err'); return; }
+  onlineState.cache[v] = r;
+  if (force && v === 'toplists') onlineState.topExpanded = false;
+  renderCards(v, r);
+  olStatus(v === 'playlists' ? '点击歌单卡片载入曲目，可勾选后批量下载' : '点击榜单卡片载入榜单歌曲', '');
 }
 
-/* 发现音乐：展示推荐歌单封面，点击歌单载入曲目 */
-async function onlineDiscover() {
-  const box = $('#ol-pls');
-  const btn = $('#ol-discover');
-  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; } // 再点一次收起
-  if (btn.disabled) return;
-  btn.disabled = true;
-  const r = await bellApi.online.discover();
-  btn.disabled = false;
-  if (!r || !r.ok) { toast((r && r.error) || '获取发现音乐失败', 'error'); return; }
-  box.innerHTML = r.playlists.map(pl => `
-    <div class="ol-pl" data-id="${pl.id}" title="${esc(pl.name)}">
-      <img src="${esc(pl.picUrl)}" alt="" loading="lazy">
-      <div class="ol-pl-name">${esc(pl.name)}</div>
-      <div class="ol-pl-count">${pl.playCount ? fmtPlayCount(pl.playCount) : ''}</div>
-    </div>`).join('');
-  box.classList.remove('hidden');
+function renderCards(v, r) {
+  const box = $('#ol-cards');
+  if (v === 'playlists') {
+    box.classList.remove('toplists');
+    box.innerHTML = (r.playlists || []).map(pl => `
+      <div class="ol-card" data-pl="${pl.id}" data-name="${esc(pl.name)}" title="${esc(pl.name)}">
+        <div class="ol-card-cover">
+          ${pl.picUrl ? `<img src="${esc(pl.picUrl)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : ''}
+          ${pl.playCount ? `<span class="ol-card-count">${fmtPlayCount(pl.playCount)}</span>` : ''}
+        </div>
+        <div class="ol-card-body">
+          <div class="ol-card-name">${esc(pl.name)}</div>
+          <div class="ol-card-sub">${[pl.trackCount ? pl.trackCount + ' 首' : '', pl.copywriter || ''].filter(Boolean).map(x => esc(x)).join(' · ')}</div>
+        </div>
+      </div>`).join('');
+    return;
+  }
+  box.classList.add('toplists');
+  const official = r.official || [], selected = r.selected || [];
+  const shown = onlineState.topExpanded ? selected : selected.slice(0, 12);
+  const card = (t) => `
+    <div class="ol-top-card" data-pl="${t.id}" data-name="${esc(t.name)}" title="${esc(t.desc)}">
+      ${t.cover ? `<img class="ol-top-cover" src="${esc(t.cover)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : ''}
+      <div class="ol-top-info">
+        <div class="ol-top-name">${esc(t.name)}</div>
+        <div class="ol-top-tip">${esc(t.updateTip || '')}</div>
+        ${(t.tracks || []).map((x, i) => `<div class="ol-top-track">${i + 1}. ${esc(x.name)} - ${esc(x.artist)}</div>`).join('')}
+      </div>
+    </div>`;
+  box.innerHTML =
+    (official.length ? '<div class="ol-group-title">官方榜</div>' + official.map(card).join('') : '') +
+    (shown.length ? `<div class="ol-group-title">精选榜${selected.length > 12 ? `（共 ${selected.length} 个）` : ''}</div>` + shown.map(card).join('') : '');
+  $('#ol-more').classList.toggle('hidden', selected.length <= 12 || onlineState.topExpanded);
 }
 
-const fmtPlayCount = (n) => n >= 1e8 ? (n / 1e8).toFixed(1) + '亿' : n >= 1e4 ? (n / 1e4).toFixed(1) + '万' : String(n);
+async function onlineLoadNewSongs() {
+  olStatus('正在获取新歌…', 'busy');
+  const r = await ncRetry(() => bellApi.online.newSongs(onlineState.area));
+  if (!r || !r.ok) { olStatus((r && r.error) || '获取新歌失败', 'err'); return; }
+  const names = { all: '全部', zh: '华语', ea: '欧美', kr: '韩国', jp: '日本' };
+  setOnlineSongs(r.songs, {
+    mode: 'new', title: `新歌速递 · ${names[onlineState.area] || '全部'}`,
+    info: `共 ${r.songs.length} 首`, batch: true
+  });
+  olStatus(`已载入 ${r.songs.length} 首新歌，见下方列表`, '');
+}
+
+async function onlineDaily() {
+  olStatus('正在获取个性推荐…', 'busy');
+  const r = await ncRetry(() => bellApi.online.daily());
+  if (!r || !r.ok) { olStatus((r && r.error) || '获取个性推荐失败', 'err'); return; }
+  setOnlineSongs(r.songs, { mode: 'daily', title: '个性推荐', info: `共 ${r.songs.length} 首`, batch: true });
+  olStatus(`已载入 ${r.songs.length} 首个性推荐，见下方列表`, '');
+}
 
 function renderOnline() {
   const body = $('#ol-body');
   const songs = onlineState.songs;
   $('#ol-empty').classList.toggle('hidden', songs.length > 0);
-  const libIds = new Set(state.library.items.filter(m => m.onlineId).map(m => m.onlineId));
-  body.innerHTML = songs.map(sg => {
-    const has = libIds.has(sg.id);
-    return `<tr>
-      <td><div class="ol-name-flex"><span class="ol-name" title="${esc(sg.name)}">${esc(sg.name)}</span>${sg.fee === 1 ? '<span class="ol-badge">VIP</span>' : ''}</div></td>
-      <td>${esc(sg.artist)}</td>
+  const libIds = new Set(state.library.items.filter(m => m.onlineId).map(m => Number(m.onlineId)));
+  body.innerHTML = songs.map((sg, i) => {
+    const has = libIds.has(Number(sg.id));
+    const sel = onlineState.selected.has(Number(sg.id));
+    return `<tr data-id="${sg.id}">
+      <td><input type="checkbox" class="ol-sel" data-id="${sg.id}" ${sel ? 'checked' : ''} ${has ? 'disabled' : ''}></td>
+      <td class="ol-no">${i + 1}</td>
+      <td><div class="ol-song-main">
+        ${sg.cover ? `<img class="ol-cover" src="${esc(sg.cover)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : '<span class="ol-cover"></span>'}
+        <div class="ol-song-text">
+          <span class="ol-name" title="${esc(sg.name)}">${esc(sg.name)}</span>
+          ${sg.vip ? '<span class="ol-badge">VIP</span>' : ''}
+          ${sg.alia ? `<span class="ol-alia">${esc(sg.alia)}</span>` : ''}
+        </div>
+      </div></td>
+      <td>${esc(sg.artist || '')}</td>
+      <td>${esc(sg.album || '')}</td>
       <td>${sg.duration ? fmtDur(sg.duration) : '--:--'}</td>
       <td class="ta-r"><div class="ol-actions">
         <button class="btn sm ghost ol-play" data-id="${sg.id}">试听</button>
@@ -1415,86 +1850,116 @@ function renderOnline() {
       </div></td>
     </tr>`;
   }).join('');
+  updateSelection();
 }
 
-async function onOnlineRowClick(e) {
+function updateSelection() {
+  const n = onlineState.selected.size;
+  $('#ol-selected').textContent = `已选 ${n} 首`;
+  const boxes = $$('#ol-body .ol-sel').filter(b => !b.disabled);
+  const all = $('#ol-check-all');
+  all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+  all.disabled = boxes.length === 0;
+}
+
+async function playOnlineSong(sg, btn) {
+  if (!sg) return;
+  if (btn) { btn.disabled = true; btn.textContent = '获取中…'; }
+  let r;
+  try { r = await bellApi.online.songUrl({ id: sg.id, level: olLevel() }); }
+  catch { r = { ok: false, error: '网络异常' }; }
+  if (btn) { btn.disabled = false; btn.textContent = '试听'; }
+  if (!r || !r.ok) {
+    const msg = (r && r.error) || '获取试听失败';
+    // 风控提示较长且需要用户按提示操作，toast 一闪而过看不全，改为常驻状态栏
+    if (r && r.risk) olStatus(msg, 'risk');
+    toast(msg, 'error');
+    return;
+  }
+  if ($('#ol-view-status').classList.contains('risk')) olStatus('', '');
+  if (!r.url) {
+    toast(onlineState.auth && onlineState.auth.loggedIn
+      ? '该歌曲暂无可用音频（可能无版权或需单独付费）'
+      : '该歌曲无法播放（VIP 歌曲请先登录网易云账号）', 'error');
+    return;
+  }
+  if (r.trial) toast('该歌曲为付费内容，正在播放约 30 秒试听片段', 'info');
+  playUrl(r.url, { musicId: null, bellName: null, kind: '手动', displayName: `${sg.name} - ${sg.artist}`.slice(0, 80) });
+}
+
+function onOnlineRowClick(e) {
   const play = e.target.closest('.ol-play');
   if (play) {
-    const sg = onlineState.songs.find(x => x.id === Number(play.dataset.id)); // dataset.id 为字符串，需转数字比较
-    if (!sg) return;
-    play.textContent = '获取中…';
-    const r = await bellApi.online.songUrl(sg.id);
-    play.textContent = '试听';
-    if (!r || !r.ok) { toast((r && r.error) || '获取试听失败', 'error'); return; }
-    if (!r.url) { toast('该歌曲无法播放（可能为 VIP 或无版权）', 'error'); return; }
-    playUrl(r.url, { musicId: null, bellName: null, kind: '手动', displayName: `${sg.name} - ${sg.artist}`.slice(0, 80) });
+    const sg = onlineState.songs.find(x => Number(x.id) === Number(play.dataset.id));
+    if (sg) playOnlineSong(sg, play);
     return;
   }
   const dl = e.target.closest('.ol-dl');
-  if (dl && !dl.disabled) await onlineDownloadOne(dl);
+  if (dl && !dl.disabled) onlineDownloadOne(dl);
 }
 
 async function onlineDownloadOne(btn) {
-  const sg = onlineState.songs.find(x => x.id === Number(btn.dataset.id));
-  if (!sg) return;
-  btn.disabled = true;
-  btn.textContent = '下载中…';
-  const r = await bellApi.online.download({ id: sg.id, name: sg.name, artist: sg.artist });
-  if (r && r.ok) {
-    state.library.items.push(r.item);
-    updateLibCount();
-    renderMusic(); renderSets(); // 刷新本地网格与方案页音乐下拉
-    btn.textContent = '已入库';
-    toast(r.trial ? `「${sg.name}」已下载（试听片段）` : `「${sg.name}」已下载入库`, 'success');
-    const g = await bellApi.music.getUrl(r.item.id);
-    if (g && g.url) {
-      const d = await probeDuration(g.url);
-      if (d) { r.item.duration = Math.round(d * 10) / 10; await bellApi.library.save(state.library.items); }
-    }
-  } else {
-    btn.disabled = false;
-    btn.textContent = '下载';
-    toast((r && r.error) || '下载失败', 'error');
-  }
+  const sg = onlineState.songs.find(x => Number(x.id) === Number(btn.dataset.id));
+  if (sg) await downloadSongs([sg.id]);
 }
 
-async function onlineDownloadAll() {
+/* 单曲 / 选中 / 全部下载共用：实时进度 + 失败明细 + 试听片段时长探测 */
+async function downloadSongs(ids) {
   if (onlineState.busy) return;
-  const btnAll = $('#ol-dl-all');
-  const btns = $$('#ol-body .ol-dl').filter(b => !b.disabled);
-  if (!btns.length) { toast('歌单中的歌曲均已入库', 'info'); return; }
+  const libIds = new Set(state.library.items.filter(m => m.onlineId).map(m => Number(m.onlineId)));
+  const list = ids
+    .map(id => onlineState.songs.find(s => Number(s.id) === Number(id)))
+    .filter(s => s && !libIds.has(Number(s.id)));
+  if (!list.length) { toast('所选歌曲均已入库', 'info'); return; }
   onlineState.busy = true;
-  btnAll.disabled = true;
+  const selBtn = $('#ol-dl-sel'), allBtn = $('#ol-dl-all');
+  selBtn.disabled = true; allBtn.disabled = true;
   let ok = 0, fail = 0;
-  for (const b of btns) {
-    const sg = onlineState.songs.find(x => x.id === Number(b.dataset.id));
-    if (!sg) continue;
-    b.disabled = true;
-    b.textContent = '下载中…';
-    const r = await bellApi.online.download({ id: sg.id, name: sg.name, artist: sg.artist });
+  const errs = [], newItems = [];
+  let riskMsg = '';
+  for (let i = 0; i < list.length; i++) {
+    const sg = list[i];
+    olProgress(`正在下载 ${i + 1}/${list.length}…`, 'busy');
+    const btn = $(`#ol-body .ol-dl[data-id="${sg.id}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = '下载中…'; }
+    let r;
+    try {
+      r = await bellApi.online.download({
+        id: sg.id, name: sg.name, artist: sg.artist, duration: sg.duration, level: olLevel()
+      });
+    } catch { r = { ok: false, error: '网络异常' }; }
     if (r && r.ok) {
       ok++;
-      b.textContent = '已入库';
       state.library.items.push(r.item);
-      updateLibCount();
+      newItems.push(r.item);
+      if (btn) btn.textContent = '已入库';
+      onlineState.selected.delete(Number(sg.id));
+      const cb = $(`#ol-body .ol-sel[data-id="${sg.id}"]`);
+      if (cb) { cb.checked = false; cb.disabled = true; }
     } else {
       fail++;
-      b.disabled = false;
-      b.textContent = '下载';
+      if (btn) { btn.disabled = false; btn.textContent = '下载'; }
+      if (r && r.risk) riskMsg = r.error;
+      if (errs.length < 3) errs.push(`${sg.name}：${(r && r.error) || '下载失败'}`);
     }
   }
-  for (const m of state.library.items.filter(x => x.online && x.duration == null)) {
-    const g = await bellApi.music.getUrl(m.id);
+  // 试听片段与无时长信息的曲目，读取本地文件探测真实时长
+  for (const it of newItems.filter(x => x.duration == null)) {
+    const g = await bellApi.music.getUrl(it.id);
     if (g && g.url) {
       const d = await probeDuration(g.url);
-      if (d) m.duration = Math.round(d * 10) / 10;
+      if (d) it.duration = Math.round(d * 10) / 10;
     }
   }
   await bellApi.library.save(state.library.items);
-  onlineState.busy = false;
-  btnAll.disabled = false;
+  updateLibCount();
   renderMusic(); renderSets(); // 刷新本地网格与方案页音乐下拉
-  toast(`批量下载完成：成功 ${ok} 首${fail ? `，失败 ${fail} 首` : ''}`, fail ? 'info' : 'success');
+  onlineState.busy = false;
+  selBtn.disabled = false; allBtn.disabled = false;
+  updateSelection();
+  olProgress(fail ? `成功 ${ok} 首，失败 ${fail} 首` : `已下载 ${ok} 首`, fail ? 'err' : '');
+  if (riskMsg) olStatus(riskMsg, 'risk');
+  toast(`下载完成：成功 ${ok} 首${fail ? `，失败 ${fail} 首` : ''}${errs.length ? '（' + errs.join('；') + '）' : ''}`, fail ? 'info' : 'success');
 }
 
 function renderMusic() {
@@ -2127,10 +2592,13 @@ function bindSettingsPage() {
   $('#set-keepawake').addEventListener('change', async (e) => {
     const on = e.target.checked;
     try {
-      await bellApi.app.setKeepAwake(on);
+      const r = await bellApi.app.setKeepAwake(on);
+      const effective = r && typeof r.keepAwake === 'boolean' ? r.keepAwake : on;
       state.settings.keepAwake = on;
+      state.appInfo.keepAwake = effective; // 以主进程返回的实际状态为准
+      e.target.checked = effective;
       saveSettingsSoon();
-      toast(on ? '运行期间将阻止电脑休眠' : '已恢复系统默认休眠策略', 'success');
+      toast(effective ? '已阻止电脑休眠（屏幕将保持常亮）' : '已恢复系统默认休眠策略', 'success');
     } catch {
       e.target.checked = !on;
       toast('设置失败，请稍后重试', 'error');
@@ -2167,7 +2635,10 @@ function syncSettingsUI() {
   $('#set-fadeout').value = state.settings.fadeOut || 0;
   $('#set-theme').value = state.settings.theme === 'light' ? 'light' : 'dark';
   $('#set-autolaunch').checked = !!state.appInfo.autoLaunch;
-  $('#set-keepawake').checked = state.settings.keepAwake !== false;
+  // 显示主进程真实持有的电源阻塞状态，而不是配置文件里的期望值
+  $('#set-keepawake').checked = state.appInfo.keepAwake !== undefined
+    ? !!state.appInfo.keepAwake
+    : (state.settings.keepAwake !== false);
   $('#data-dir-show').textContent = state.appInfo.dataDir || '—';
   $('#about-version').textContent = 'v' + (state.appInfo.version || '1.0.0');
   updateMuteButtons(isMuted());

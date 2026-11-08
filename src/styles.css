@@ -417,6 +417,110 @@ svg { display: block; }
 .ol-status { font-size: 12px; color: var(--ok); white-space: nowrap; }
 .ol-status.err { color: var(--danger); }
 .ol-status.busy { color: var(--dim); }
+
+/* ---------- 在线音乐：分段 Tab + 卡片网格 + 歌曲列表 ---------- */
+.ol-tools { margin-bottom: 14px; }
+.ol-tool-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.ol-field { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.ol-field-wide { flex: 1 1 260px; }
+.ol-field-narrow { flex: 0 0 104px; display: block; }
+.ol-field .modal-input { margin-bottom: 0; min-width: 0; flex: 1; }
+.ol-field-wide .btn { flex-shrink: 0; }
+.ol-field-label { display: block; font-size: 11px; color: var(--faint); margin-bottom: 6px; }
+.ol-field-narrow .modal-input { width: 100%; }
+.ol-hot { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; font-size: 12px; }
+.ol-hot-label { color: var(--faint); flex-shrink: 0; }
+.ol-hot-words { display: flex; gap: 6px; flex-wrap: wrap; }
+.ol-hot-chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2); color: var(--dim); cursor: pointer; font-size: 12px; }
+.ol-hot-chip:hover { color: var(--accent); border-color: var(--accent); }
+.ol-hot-chip.hot { color: var(--danger); }
+
+.ol-discover { margin-bottom: 14px; }
+.ol-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.ol-head .card-title { margin-right: auto; }
+.ol-seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); }
+.ol-seg .btn { border: 0; background: transparent; }
+.ol-seg .btn.on { background: var(--accent); color: #fff; }
+.ol-filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.ol-filters-label { font-size: 12px; color: var(--faint); margin-right: 4px; }
+.ol-filters .btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.ol-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(146px, 1fr)); gap: 14px; }
+.ol-card { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); overflow: hidden; cursor: pointer; transition: border-color .15s, transform .15s; }
+.ol-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.ol-card-cover { position: relative; aspect-ratio: 1 / 1; background: var(--panel); overflow: hidden; }
+.ol-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ol-card-count { position: absolute; right: 6px; top: 6px; padding: 2px 7px; border-radius: 999px; background: rgba(0,0,0,.62); color: #fff; font-size: 11px; }
+.ol-card-body { padding: 9px 10px 11px; }
+.ol-card-name { font-size: 13px; color: var(--text); line-height: 1.4; height: 2.8em; overflow: hidden; }
+.ol-card-sub { font-size: 11px; color: var(--faint); margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ol-cards.toplists { grid-template-columns: repeat(auto-fill, minmax(288px, 1fr)); }
+.ol-top-card { display: flex; gap: 12px; padding: 10px; cursor: pointer; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.ol-top-card:hover { border-color: var(--accent); }
+.ol-top-cover { width: 88px; height: 88px; border-radius: 8px; object-fit: cover; flex-shrink: 0; background: var(--panel); }
+.ol-top-info { min-width: 0; flex: 1; }
+.ol-top-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.ol-top-tip { font-size: 11px; color: var(--accent); margin: 4px 0 6px; }
+.ol-top-track { font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.7; }
+.ol-group-title { grid-column: 1 / -1; font-size: 13px; font-weight: 600; color: var(--dim); padding: 6px 0; border-bottom: 1px solid var(--border); }
+.ol-more { text-align: center; margin-top: 14px; }
+.ol-view-status { font-size: 12px; color: var(--faint); margin-top: 12px; text-align: center; }
+.ol-view-status.err { color: var(--danger); }
+/* 风控提示常驻展示：文案较长且含操作指引，需成块显示 */
+.ol-view-status.risk { padding: 10px 12px; text-align: left; line-height: 1.7; color: var(--danger); background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
+.ol-view-status.risk:empty { display: none; }
+
+.ol-detail { display: flex; gap: 14px; align-items: flex-start; padding: 12px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.ol-detail-cover { width: 84px; height: 84px; border-radius: 8px; object-fit: cover; flex-shrink: 0; }
+.ol-detail-main { min-width: 0; flex: 1; }
+.ol-detail-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.ol-detail-meta { font-size: 12px; color: var(--faint); margin-top: 6px; line-height: 1.6; }
+.ol-detail-desc { font-size: 12px; color: var(--dim); margin-top: 6px; line-height: 1.6; max-height: 3.2em; overflow: hidden; }
+.ol-tag { display: inline-block; padding: 1px 7px; margin-right: 5px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; color: var(--dim); }
+
+.ol-batch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 0; border-top: 1px solid var(--border); }
+.ol-selected { font-size: 12px; color: var(--dim); }
+.ol-batch-actions { display: flex; gap: 8px; }
+.ol-batch .ol-status { margin-left: auto; }
+.ol-table .col-check { width: 34px; }
+.ol-table .col-no { width: 38px; color: var(--faint); font-size: 12px; }
+.ol-song-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ol-cover { display: block; width: 36px; height: 36px; border-radius: 6px; object-fit: cover; flex-shrink: 0; background: var(--panel-2); }
+.ol-song-text { min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ol-alia { font-size: 11px; color: var(--faint); }
+.ol-badge { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: rgba(245,158,11,.16); color: #f59e0b; flex-shrink: 0; }
+.ol-badge.trial { background: rgba(99,102,241,.16); color: #818cf8; }
+.ol-table tr:hover { background: var(--panel-2); }
+.ol-table td { vertical-align: middle; }
+
+/* ---------- 网易云账号条 ---------- */
+.nc-account { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.nc-avatar {
+  width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--accent); font-size: 20px;
+}
+.nc-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.nc-info { flex: 1; min-width: 0; }
+.nc-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.nc-name .nc-vip { margin-left: 8px; font-size: 11px; font-weight: 600; color: #f59e0b; }
+.nc-sub { font-size: 12px; color: var(--faint); margin-top: 4px; line-height: 1.5; }
+.nc-actions { display: flex; gap: 8px; flex-shrink: 0; }
+/* ---------- 网易云登录弹窗 ---------- */
+.nc-tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+.nc-pane { min-height: 196px; }
+.nc-login .modal-input { margin-bottom: 14px; }
+.nc-qr-box { width: 176px; height: 176px; margin: 0 auto 12px; padding: 8px; background: #fff; border-radius: 12px; }
+.nc-qr-box img { width: 100%; height: 100%; display: block; }
+.nc-qr-status { text-align: center; font-size: 13px; color: var(--dim); margin-bottom: 10px; }
+.nc-qr-status.err { color: var(--danger); }
+.nc-qr-status.ok { color: var(--ok); }
+.nc-hint { font-size: 12px; color: var(--faint); line-height: 1.6; margin-top: 12px; }
+.nc-code-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 14px; }
+.nc-code-row .modal-input { flex: 1; min-width: 0; margin-bottom: 0; }
+.nc-cookie { min-height: 96px; resize: vertical; font-family: monospace; font-size: 12px; line-height: 1.5; }
+.nc-center { text-align: center; }
 .ta-r { text-align: right; }
 
 /* 均衡器动画 */

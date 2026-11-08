@@ -11,6 +11,13 @@ const { readJson, writeJson } = require('./lib/store');
 const { buildSeedLibrary, defaultSchedule } = require('./lib/seed-music');
 const nc = require('NeteaseCloudMusicApi'); // 网易云音乐 API（在线音乐来源，SPlayer 同源）
 
+// 打铃调度器是渲染进程里 250ms 的 setInterval，窗口隐藏到托盘 / 被遮挡时
+// Chromium 默认会节流后台定时器（最严可到分钟级），导致 5 秒宽限窗内漏打铃。
+// 全局关闭后台节流，并在 BrowserWindow 的 webPreferences 上同步关闭，双保险。
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
 // ---------- 数据文件位置（%APPDATA%\campus-bell-system） ----------
 const DATA_DIR = app.getPath('userData');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
@@ -22,21 +29,186 @@ const TTS_PREVIEW_DIR = path.join(DATA_DIR, 'tts-preview');
 const SET_FILE = path.join(DATA_DIR, 'settings.json');
 const LOG_FILE = path.join(DATA_DIR, 'logs.json');
 const LOG_LIMIT = 2000;
+const NETEASE_FILE = path.join(DATA_DIR, 'netease.json'); // 网易云登录凭证（含 Cookie，仅存本机，不参与备份导出）
 
 let win = null;
 let tray = null;
 let isQuitting = false;
 let miniWin = null;       // 顶部迷你悬浮条（主窗口关闭到托盘时显示）
 let miniEnabled = true;   // 迷你条开关（托盘菜单可切换；× 隐藏即关闭）
-let sleepBlockerId = null; // 防休眠阻塞器（prevent-app-suspension：系统保持唤醒，屏幕可正常关闭）
+let sleepBlockerId = null; // 防休眠阻塞器（prevent-display-sleep：真正产生 SYSTEM 电源请求）
+
+// ---------- 网易云账号登录态 ----------
+// Cookie 只保存在本机 userData 的 netease.json；不写日志、不参与备份导出。
+// 未登录时在线音乐仍按匿名方式可用（VIP 歌曲通常只能取到试听片段）。
+function emptyNeteaseAuth() {
+  return { cookie: '', profile: null, updatedAt: null, loggedIn: false, expired: false, checked: false };
+}
+let neteaseAuth = (() => {
+  const d = readJson(NETEASE_FILE, {}) || {};
+  const a = emptyNeteaseAuth();
+  if (typeof d.cookie === 'string' && d.cookie.trim()) {
+    a.cookie = d.cookie.trim();
+    a.profile = d.profile || null;
+    a.updatedAt = d.updatedAt || null;
+  }
+  return a;
+})();
+
+function saveNeteaseAuth() {
+  writeJson(NETEASE_FILE, {
+    cookie: neteaseAuth.cookie,
+    profile: neteaseAuth.profile,
+    updatedAt: neteaseAuth.updatedAt
+  });
+}
+
+function neteaseProfile(data) {
+  const d = data || {};
+  const p = d.profile || {};
+  const a = d.account || {};
+  return {
+    nickname: String(p.nickname || a.userName || '网易云用户').slice(0, 40),
+    avatar: String(p.avatarUrl || p.avatarImgIdStr || a.avatarUrl || '').replace(/^http:/, 'https:'),
+    userId: p.userId || a.id || null,
+    vip: !!(p.vipType || a.vipType || p.redVipLevel || a.redVipLevel)
+  };
+}
+
+function neteaseAuthView() {
+  return {
+    loggedIn: !!neteaseAuth.loggedIn,
+    expired: !!neteaseAuth.expired,
+    checked: !!neteaseAuth.checked,
+    profile: neteaseAuth.profile,
+    updatedAt: neteaseAuth.updatedAt
+  };
+}
+
+// 网易云 API 失败时 reject 的是普通对象 { status, body:{code,message}, cookie }，不是 Error 实例：
+// err.message 恒为 undefined，直接拼字符串只会得到 "[object Object]"，真实失败原因被吞掉。
+function ncFail(err, fallback) {
+  const b = (err && err.body) || {};
+  const code = b.code || (err && err.status);
+  const raw = b.message || b.msg || (typeof b === 'string' ? b : '');
+  const text = (typeof raw === 'string' && raw.trim()) ? raw.trim() : ((err && err.message) || fallback);
+  return text + (code && Number(code) !== 200 ? `（错误码 ${code}）` : '');
+}
+
+// 按错误码给出可执行的下一步建议。
+// 1004「当前登录存在安全风险」等风控码由网易服务端下发，第三方客户端无从绕过，
+// 反复重试还会加重账号限制，因此必须明确劝阻并引导到其它登录方式。
+function ncLoginHint(code) {
+  switch (Number(code)) {
+    case 1004:
+      return '这是网易对第三方客户端的账号安全风控，短信登录已被拒绝，重试无法解决且可能加重限制。请改用「扫码登录」，或最稳妥的「Cookie 登录」——在官网登录后再复制凭证，本应用不参与登录动作';
+    case 400: case 8821: case 2000: case 460:
+      return '网易已风控拦截，请改用「扫码登录」或「Cookie 登录」';
+    case 405:
+      return '操作过于频繁，请稍后再试；若持续出现请改用「扫码登录」或「Cookie 登录」';
+    case 503: case 509:
+      return '验证码错误或已过期，请重新发送后再试';
+    case 501:
+      return '该手机号未注册网易云账号';
+    case 502:
+      return '网络异常或网易服务不可用，请稍后重试';
+    default: return '';
+  }
+}
+
+// Set-Cookie 数组（或库拼接后的字符串）清洗成标准 "k=v; k=v"。
+// 库内部 cookieToJson 会把 Max-Age / Expires / Path 等属性当成 cookie 名，
+// 值里含 "=" 的段还会被整段丢弃，导致明明登录成功却校验为未登录。
+function ncCleanCookie(r) {
+  const segs = [];
+  if (r && Array.isArray(r.cookie) && r.cookie.length) {
+    for (const s of r.cookie) segs.push(String(s).split(';')[0].trim());
+  } else {
+    for (const s of String((r && r.body && r.body.cookie) || '').split(';')) segs.push(s.trim());
+  }
+  const out = new Map();
+  for (const kv of segs) {
+    const i = kv.indexOf('=');
+    if (i <= 0) continue;
+    const k = kv.slice(0, i).trim(), v = kv.slice(i + 1).trim();
+    if (!k || /^(Max-Age|Expires|Path|Domain|SameSite|Secure|HttpOnly|Priority)$/i.test(k)) continue;
+    out.set(k, v);
+  }
+  return [...out].map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+// 传对象给 API 可绕过库内部按 "=" 切分的 cookieToJson，保证凭证完整送达
+function ncCookieObject(cookieStr) {
+  const obj = {};
+  for (const s of String(cookieStr || '').split(';')) {
+    const i = s.indexOf('=');
+    if (i <= 0) continue;
+    const k = s.slice(0, i).trim(), v = s.slice(i + 1).trim();
+    if (k) obj[k] = v;
+  }
+  return obj;
+}
+
+// 用 /api/w/nuser/account/get 校验 Cookie 是否仍然有效
+async function verifyNeteaseCookie(cookie) {
+  try {
+    const r = await nc.login_status({ cookie: ncCookieObject(cookie) });
+    const d = r && r.body && r.body.data;
+    if (d && (d.profile || d.account)) return { ok: true, profile: neteaseProfile(d) };
+    return { ok: false, message: 'Cookie 无效或已过期，请重新登录' };
+  } catch (err) {
+    return { ok: false, message: '登录态校验失败：' + ncFail(err, '网易服务不可用') };
+  }
+}
+
+async function refreshNeteaseAuth() {
+  if (!neteaseAuth.cookie) {
+    neteaseAuth.loggedIn = false;
+    neteaseAuth.expired = false;
+    neteaseAuth.checked = true;
+    return neteaseAuthView();
+  }
+  try {
+    const v = await verifyNeteaseCookie(neteaseAuth.cookie);
+    neteaseAuth.checked = true;
+    neteaseAuth.loggedIn = v.ok;
+    neteaseAuth.expired = !v.ok;
+    if (v.ok) {
+      neteaseAuth.profile = v.profile;
+      saveNeteaseAuth();
+    }
+  } catch (err) {
+    // 网络异常不能判定为 Cookie 失效：保留凭证，仅标记为未校验
+    neteaseAuth.checked = false;
+    neteaseAuth.loggedIn = false;
+    console.log('[netease] 登录态校验失败（网络或服务异常）');
+  }
+  return neteaseAuthView();
+}
+
+async function setNeteaseCookie(cookie) {
+  const v = await verifyNeteaseCookie(cookie);
+  if (!v.ok) return { ok: false, error: v.message };
+  neteaseAuth = {
+    cookie, profile: v.profile, updatedAt: new Date().toISOString(),
+    loggedIn: true, expired: false, checked: true
+  };
+  saveNeteaseAuth();
+  console.log('[netease] 登录成功：' + v.profile.nickname);
+  return { ok: true, auth: neteaseAuthView() };
+}
 
 // ---------- 运行时防电脑睡眠 ----------
-// 铃声依赖定时器触发：电脑一旦休眠，铃声将整段漏播。默认开启阻塞（仅阻止系统休眠，不阻止屏幕熄灭）。
+// 铃声依赖渲染进程的定时器触发：电脑一旦进入 S3 睡眠，定时器与音频都会停摆，铃声整段漏播。
+// 【实测结论 / Electron 33 + Windows】prevent-app-suspension 只登记 PowerRequestExecutionRequired
+// （防止进程被挂起），powercfg /requests 的 SYSTEM 栏仍为「无」，并不能阻止系统睡眠；
+// 只有 prevent-display-sleep 会同时登记 SYSTEM + DISPLAY 请求，才能真正阻止系统睡眠。
+// 代价：开启期间屏幕也不会自动熄灭（保证铃声不漏播优先）。默认开启。
 function applyKeepAwake(enabled) {
   const on = enabled !== false; // 默认开启
   if (on && sleepBlockerId === null) {
-    sleepBlockerId = powerSaveBlocker.start('prevent-app-suspension');
-    console.log('[power] 已阻止系统休眠（屏幕仍可正常关闭）');
+    sleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+    console.log('[power] 已阻止系统休眠（开启期间屏幕不会自动熄灭）');
   } else if (!on && sleepBlockerId !== null) {
     powerSaveBlocker.stop(sleepBlockerId);
     sleepBlockerId = null;
@@ -92,7 +264,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      spellcheck: false
+      spellcheck: false,
+      backgroundThrottling: false // 隐藏到托盘后打铃调度定时器仍按 250ms 正常运行
     }
   });
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
@@ -131,7 +304,8 @@ function createMiniWin() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      spellcheck: false
+      spellcheck: false,
+      backgroundThrottling: false // 隐藏到托盘后打铃调度定时器仍按 250ms 正常运行
     }
   });
   miniWin.loadFile(path.join(__dirname, 'src', 'mini.html'));
@@ -258,94 +432,384 @@ function registerIpc() {
 
   // ---------- 在线音乐（网易云音乐 API，仅用于获取音乐，下载后本地播放） ----------
   const artistNames = (ar) => (ar || []).map(a => a.name).filter(Boolean).join('/') || '未知歌手';
+  // 所有在线请求统一携带登录 Cookie；未登录时为空字符串，行为与匿名访问一致
+  const ncOpts = (o) => ({ ...o, cookie: ncCookieObject(neteaseAuth.cookie || '') });
 
-  ipcMain.handle('online:search', async (_e, keywords) => {
+  // ===== 网易云账号登录 =====
+  // 首次查询时顺带联网校验已保存的 Cookie，之后只返回缓存状态
+  ipcMain.handle('online:auth', async () => {
+    if (neteaseAuth.cookie && !neteaseAuth.checked) return refreshNeteaseAuth();
+    return neteaseAuthView();
+  });
+  ipcMain.handle('online:authRefresh', () => refreshNeteaseAuth());
+
+  // 扫码登录：取 unikey → 生成二维码 → 渲染端轮询扫码状态
+  ipcMain.handle('online:loginQrStart', async () => {
     try {
-      const r = await nc.search({ keywords: String(keywords || '').trim(), limit: 30 });
-      const songs = (r.body && r.body.result && r.body.result.songs) || [];
-      return { ok: true, songs: songs.map(sg => ({
-        id: sg.id, name: sg.name, artist: artistNames(sg.artists),
-        album: (sg.album && sg.album.name) || '',
-        duration: sg.duration ? Math.round(sg.duration / 1000) : null,
-        fee: sg.fee })) };
-    } catch (err) { return { ok: false, error: '搜索失败，请检查网络连接' }; }
+      const k = await nc.login_qr_key({ cookie: '' });
+      const key = k && k.body && k.body.data && k.body.data.unikey;
+      if (!key) return { ok: false, error: '无法获取登录二维码，请稍后重试' };
+      const q = await nc.login_qr_create({ key, qrimg: true, cookie: '' });
+      const qrimg = q && q.body && q.body.data && q.body.data.qrimg;
+      if (!qrimg) return { ok: false, error: '二维码生成失败' };
+      return { ok: true, key, qrimg };
+    } catch (err) { return { ok: false, error: '二维码获取失败：' + ncFail(err, '网络异常') }; }
   });
 
-  ipcMain.handle('online:songUrl', async (_e, id) => {
+  ipcMain.handle('online:loginQrCheck', async (_e, key) => {
+    if (!key || typeof key !== 'string') return { status: 'error', error: '二维码已失效，请重新获取' };
     try {
-      const r = await nc.song_url_v1({ id, level: 'exhigh' });
-      const d = (r.body && r.body.data && r.body.data[0]) || {};
-      // CDN 支持 https：用 https 避免 file:// 页面被混合内容策略拦截
-      return { ok: true, url: d.url ? d.url.replace(/^http:/, 'https:') : null, type: d.type || '', trial: d.freeTrialInfo || null };
-    } catch (err) { return { ok: false, error: '获取试听地址失败' }; }
+      const r = await nc.login_qr_check({ key, cookie: '' });
+      const code = r && r.body && r.body.code;
+      if (code === 803) {
+        const cookie = ncCleanCookie(r);
+        if (!/MUSIC_U|MUSIC_A/i.test(cookie)) return { status: 'error', error: '登录成功但未取得凭证，请重试' };
+        const res = await setNeteaseCookie(cookie);
+        return res.ok ? { status: 'success', auth: res.auth } : { status: 'error', error: res.error };
+      }
+      if (code === 800) return { status: 'expired' };
+      if (code === 802) return { status: 'scanned' };
+      return { status: 'waiting', code: code || 801 };
+    } catch (err) { return { status: 'error', error: '扫码状态查询失败：' + ncFail(err, '网络异常') }; }
   });
 
-  ipcMain.handle('online:download', async (_e, song) => {
+  // 手机号 + 短信验证码登录。网易对该接口风控较严，失败时必须把真实错误码/原因透给界面，
+  // 否则用户只会看到笼统的「登录失败」，无法区分验证码输错、发送过频还是被风控。
+  ipcMain.handle('online:loginSendCode', async (_e, phone) => {
+    const p = String(phone || '').trim();
+    if (!/^1\d{10}$/.test(p)) return { ok: false, error: '请输入 11 位中国大陆手机号' };
     try {
-      const r = await nc.song_url_v1({ id: song.id, level: 'exhigh' });
-      const d = (r.body && r.body.data && r.body.data[0]) || {};
-      if (!d.url) return { ok: false, error: '无法获取音频（可能为 VIP 或无版权歌曲）' };
-      const res = await fetch(d.url);
-      if (!res.ok) return { ok: false, error: '下载失败：HTTP ' + res.status };
-      const buf = Buffer.from(await res.arrayBuffer());
-      const ext = '.' + (/^[a-z0-9]{2,5}$/i.test(String(d.type)) ? d.type : 'mp3');
-      const newId = 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-      fs.writeFileSync(path.join(MEDIA_DIR, newId + ext), buf);
-      const item = {
-        id: newId, name: `${song.name} - ${song.artist}`.slice(0, 80), fileName: newId + ext, ext,
-        duration: null, category: '其他', builtIn: false, online: true, onlineId: song.id,
-        addedAt: new Date().toISOString()
-      };
-      const data = lib();
-      data.items.push(item);
-      writeJson(LIB_FILE, data);
-      return { ok: true, item, trial: d.freeTrialInfo || null };
+      const r = await nc.captcha_sent({ phone: p, ctcode: '86', cookie: '' });
+      if (r && r.body && r.body.code === 200) return { ok: true };
+      const code = (r && r.body && r.body.code) || 0;
+      return { ok: false, code, error: ((r && r.body && r.body.message) || '验证码发送失败，请稍后重试') + (code ? `（错误码 ${code}）` : '') };
     } catch (err) {
-      return { ok: false, error: '下载失败，请检查网络连接' };
+      const code = (err && err.body && err.body.code) || (err && err.status) || 0;
+      if (Number(code) === 405) return { ok: false, code, error: '发送太频繁，请等待约 1 分钟后再试（错误码 405）' };
+      const hint = ncLoginHint(code);
+      return { ok: false, code, error: ncFail(err, '验证码发送失败，请稍后重试') + (hint ? `；${hint}` : '') };
     }
   });
 
+  ipcMain.handle('online:loginPhone', async (_e, payload) => {
+    const p = String((payload && payload.phone) || '').trim();
+    const c = String((payload && payload.captcha) || '').trim();
+    if (!/^1\d{10}$/.test(p) || !/^\d{4,6}$/.test(c)) return { ok: false, error: '手机号或验证码格式不正确' };
+    try {
+      const r = await nc.login_cellphone({ phone: p, captcha: c, countrycode: '86', cookie: '' });
+      const b = (r && r.body) || {};
+      const code = b.code || 0;
+      // 仅 200 且拿到真实登录凭证才算成功：失败响应里也可能带 NMTID 之类的 Set-Cookie
+      const cookie = Number(code) === 200 ? ncCleanCookie(r) : '';
+      if (!cookie || !/MUSIC_U|MUSIC_A/i.test(cookie)) {
+        const msg = b.message || b.msg || '登录失败，请检查验证码或改用扫码登录';
+        const hint = ncLoginHint(code);
+        return { ok: false, code, error: msg + (code && Number(code) !== 200 ? `（错误码 ${code}）` : '') + (hint ? `；${hint}` : '') };
+      }
+      const res = await setNeteaseCookie(cookie);
+      return res.ok ? { ok: true, auth: res.auth } : { ok: false, error: res.error };
+    } catch (err) {
+      const code = (err && err.body && err.body.code) || (err && err.status) || 0;
+      const hint = ncLoginHint(code);
+      return { ok: false, code, error: ncFail(err, '登录失败，请检查验证码') + (hint ? `；${hint}` : '') };
+    }
+  });
+
+  // 手动粘贴浏览器 Cookie：扫码 / 短信被风控时最可靠的兜底方式
+  ipcMain.handle('online:loginCookie', async (_e, raw) => {
+    const cookie = String(raw || '').trim()
+      .replace(/^cookie\s*:\s*/i, '')
+      .replace(/[\r\n]+/g, '; ')
+      .replace(/\s*;\s*/g, '; ')
+      .replace(/\s*=\s*/g, '=')
+      .replace(/;+\s*$/, '');
+    if (!cookie || !/MUSIC_U|MUSIC_A|__csrf|NMTID/i.test(cookie)) {
+      return { ok: false, error: 'Cookie 格式不正确，请从 music.163.com 完整复制（需包含 MUSIC_U）' };
+    }
+    try {
+      const res = await setNeteaseCookie(cookie);
+      return res.ok ? { ok: true, auth: res.auth } : { ok: false, error: res.error };
+    } catch (err) { return { ok: false, error: 'Cookie 校验失败：' + ncFail(err, '网络异常') }; }
+  });
+
+  ipcMain.handle('online:logout', () => {
+    neteaseAuth = emptyNeteaseAuth();
+    neteaseAuth.checked = true;
+    saveNeteaseAuth();
+    console.log('[netease] 已退出登录');
+    return { ok: true, auth: neteaseAuthView() };
+  });
+
+  // ===== 统一的歌曲视图 =====
+  // 云搜索 / 歌单 / 榜单 / 推荐接口字段各不相同（al vs album、ar vs artists、dt vs duration），
+  // 统一成渲染端可直接使用的结构，界面才能像 SPlayer 那样同时显示封面、专辑、时长与标签。
+  const toHttps = (u) => String(u || '').replace(/^http:/, 'https:');
+  const songView = (sg) => {
+    const s = sg || {};
+    const src = (s.song && typeof s.song === 'object') ? s.song : s;
+    const al = (s.al && typeof s.al === 'object') ? s.al
+      : (src.al && typeof src.al === 'object') ? src.al
+      : (s.album && typeof s.album === 'object') ? s.album : {};
+    const ar = [s.ar, s.artists, src.ar, src.artists].find(Array.isArray) || [];
+    const ms = s.dt || s.duration || src.dt || src.duration || 0;
+    const fee = s.fee ?? src.fee ?? 0;
+    return {
+      id: s.id || src.id,
+      name: String(s.name || src.name || '未知歌曲'),
+      artist: artistNames(ar),
+      album: String(al.name || ''),
+      cover: toHttps(al.picUrl || al.pic || s.picUrl || ''),
+      duration: ms ? Math.round(ms / 1000) : null,
+      fee, vip: Number(fee) === 1,
+      alia: (s.alia || src.alia || []).filter(Boolean).join(' / ')
+    };
+  };
+  // 音质白名单：无对应音质时网易会返回最高可用音质，界面会提示这一点
+  const NC_LEVELS = new Set(['standard', 'higher', 'exhigh', 'lossless', 'hires']);
+  const ncLevel = (v) => NC_LEVELS.has(String(v)) ? String(v) : 'exhigh';
+
+  // ===== 取链：风控自动降级 + 缓存 + 串行节流 =====
+  // 实测结论：/api/song/enhance/player/url/v1 对单 IP 有严格突发限制，短时间连续请求
+  // （快速连点试听、批量下载）会返回 -460「检测到您的网络环境存在风险，请稍后再试」，
+  // 而同一时刻 /api/song/enhance/download/url/v1 与旧版 /api/song/enhance/player/url
+  // 仍正常返回，且 data 字段完全一致。因此按 v1 → 旧版播放 → download/v1 → 旧版下载
+  // 依次降级，并缓存成功的 CDN 链接、限制请求频率，尽量不再触发风控。
+  const NC_LEVEL_BR = { standard: 128000, higher: 192000, exhigh: 320000, lossless: 999000, hires: 999000 };
+  const URL_TTL = 5 * 60 * 1000;      // CDN 链接缓存 5 分钟（实测链接有效期远长于此）
+  const URL_MIN_GAP = 800;             // 相邻取链请求最小间隔
+  const V1_COOLDOWN = 5 * 60 * 1000;  // v1 触发风控后暂时熔断，直接走备用接口
+  const songUrlCache = new Map();
+  let urlChain = Promise.resolve();
+  let lastUrlAt = 0;
+  let v1BlockedUntil = 0;
+
+  const ncIsRisk = (err) => {
+    const code = Number((err && err.body && err.body.code) || 0);
+    const text = String((err && err.body && err.body.message) || (err && err.message) || '');
+    return code === -460 || code === -462 || /网络环境存在风险|稍后再试|操作过于频繁/i.test(text);
+  };
+
+  function throttleUrl() {
+    const run = urlChain.then(async () => {
+      const gap = URL_MIN_GAP - (Date.now() - lastUrlAt);
+      if (gap > 0) await new Promise(r => setTimeout(r, gap));
+      lastUrlAt = Date.now();
+    });
+    urlChain = run.catch(() => {});
+    return run;
+  }
+
+  const urlData = (r) => {
+    const d = r && r.body && r.body.data;
+    return (Array.isArray(d) ? d[0] : d) || {};
+  };
+
+  async function fetchSongUrl(id, level, opts = {}) {
+    const lv = ncLevel(level);
+    const key = `${id}:${lv}`;
+    const hit = songUrlCache.get(key);
+    if (hit && hit.url && (opts.maxAge !== 0) && Date.now() - hit.at < (opts.maxAge || URL_TTL)) {
+      return { ...hit, cached: true };
+    }
+    await throttleUrl();
+    const br = NC_LEVEL_BR[lv] || 320000;
+    const v1Opts = ncOpts({ id, level: lv });
+    // 顺序很重要：两个「播放」接口优先，两个「下载」接口兜底。
+    // 实测 VIP 歌曲在下载类接口返回 -105 完全无音频，但播放接口仍会给约 30 秒试听片段，
+    // 若把 download/v1 排在前面就会把可试听的歌曲误判为「无音频」。
+    const plan = [
+      ['v1', () => nc.song_url_v1(v1Opts)],
+      ['legacy', () => nc.song_url(ncOpts({ id, br }))],
+      ['download_v1', () => nc.song_download_url_v1(v1Opts)],
+      ['legacy_download', () => nc.song_download_url(ncOpts({ id, br }))]
+    ];
+    const steps = Date.now() < v1BlockedUntil ? plan.slice(1) : plan;
+    const errs = [];
+    let risk = false;
+    let empty = null;
+    for (const [via, call] of steps) {
+      try {
+        const d = urlData(await call());
+        if (!d.url) {
+          // 无音频（-105 等）不代表其它接口也拿不到：播放接口常能提供 VIP 试听片段，继续降级
+          empty = { ok: true, url: null, type: '', trial: null, level: null,
+            code: d.code || null, via };
+          continue;
+        }
+        const out = { ok: true, url: toHttps(d.url), type: d.type || '',
+          trial: d.freeTrialInfo || null, level: d.level || lv, br: d.br || null,
+          via, at: Date.now() };
+        songUrlCache.set(key, out);
+        return out;
+      } catch (err) {
+        if (ncIsRisk(err)) {
+          risk = true;
+          if (via === 'v1') v1BlockedUntil = Date.now() + V1_COOLDOWN;
+        }
+        errs.push(`${via}: ${ncFail(err, '请求失败')}`);
+      }
+    }
+    if (empty) return empty; // 各接口都成功但均无音频 → 交给上层给出版权/付费提示
+    return {
+      ok: false, risk,
+      error: risk
+        ? '网易暂时限制了本机 IP 的取链请求（网络环境风险 -460），已自动尝试全部备用接口。请等待 1–2 分钟再试；若持续出现，可在上方登录网易云账号或切换网络。已下载到本地的铃声不受影响。'
+        : '取链失败：' + (errs[errs.length - 1] || '网易服务不可用')
+    };
+  }
+
+  // 试听与下载共用。下载时若命中缓存的 CDN 链接已过期，清缓存重新取一次。
+  async function downloadSongFile(s) {
+    const lv = ncLevel(s.level);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const u = await fetchSongUrl(s.id, lv, { maxAge: attempt === 0 ? 2 * 60 * 1000 : 0 });
+      if (!u.ok) return { ok: false, error: u.error, risk: !!u.risk };
+      if (!u.url) {
+        return { ok: false, error: neteaseAuth.loggedIn
+          ? '无法获取音频（可能无版权、需单独付费或已下架）'
+          : '无法获取音频（VIP 歌曲请先在上方登录网易云账号）' };
+      }
+      try {
+        const res = await fetch(u.url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const buf = Buffer.from(await res.arrayBuffer());
+        const ext = '.' + (/^[a-z0-9]{2,5}$/i.test(String(u.type)) ? u.type : 'mp3');
+        const newId = 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+        fs.writeFileSync(path.join(MEDIA_DIR, newId + ext), buf);
+        const item = {
+          id: newId, name: `${s.name} - ${s.artist}`.slice(0, 80), fileName: newId + ext, ext,
+          // 试听片段的真实时长与元数据不一致，置空让渲染端读文件探测
+          duration: u.trial ? null : (s.duration || null),
+          category: '其他', builtIn: false, online: true, onlineId: s.id,
+          addedAt: new Date().toISOString()
+        };
+        const data = lib();
+        data.items.push(item);
+        writeJson(LIB_FILE, data);
+        return { ok: true, item, trial: u.trial, level: u.level, via: u.via };
+      } catch (err) {
+        songUrlCache.delete(`${s.id}:${lv}`);
+        if (attempt === 1) return { ok: false, error: '下载失败：' + ncFail(err, '请检查网络连接') };
+      }
+    }
+  }
+
+  // 云搜索：带专辑封面 / 别名 / 分页，替代信息较少的 /search
+  ipcMain.handle('online:search', async (_e, payload) => {
+    const p = typeof payload === 'string' ? { keywords: payload } : (payload || {});
+    const kw = String(p.keywords || '').trim();
+    if (!kw) return { ok: false, error: '请输入搜索关键词' };
+    const offset = Math.max(0, Number(p.offset) || 0);
+    const limit = Math.min(50, Math.max(1, Number(p.limit) || 30));
+    try {
+      const r = await nc.cloudsearch(ncOpts({ keywords: kw, type: 1, limit, offset }));
+      const res = (r.body && r.body.result) || {};
+      const songs = (res.songs || []).map(songView);
+      const total = Number(res.songCount) || songs.length;
+      return { ok: true, songs, total, offset, keyword: kw,
+        hasMore: songs.length > 0 && offset + songs.length < total };
+    } catch (err) { return { ok: false, error: '搜索失败：' + ncFail(err, '请检查网络连接') }; }
+  });
+
+  // 热搜榜（搜索框下方的快捷词）
+  ipcMain.handle('online:hotSearch', async () => {
+    try {
+      const r = await nc.search_hot_detail(ncOpts({}));
+      const list = (r.body && r.body.data) || [];
+      return { ok: true, words: list.slice(0, 12).map(x => ({
+        word: String(x.searchWord || '').trim(), score: x.score || 0, hot: Number(x.iconType) > 0
+      })).filter(x => x.word) };
+    } catch (err) { return { ok: false, error: '获取热搜失败：' + ncFail(err, '网络异常') }; }
+  });
+
+  // 排行榜：官方榜（带 ToplistType）与精选榜分组，卡面直接显示前 3 首与更新文案
+  ipcMain.handle('online:toplists', async () => {
+    try {
+      const r = await nc.toplist_detail(ncOpts({}));
+      const list = (r.body && r.body.list) || [];
+      const card = (it) => ({
+        id: it.id, name: String(it.name || ''),
+        cover: toHttps(it.coverImgUrl || it.coverImageUrl || ''),
+        desc: String(it.description || '').slice(0, 120),
+        updateTip: String(it.updateFrequency || it.updateTip || ''),
+        trackCount: it.trackCount || 0, playCount: it.playCount || 0,
+        tracks: (it.tracks || []).slice(0, 3).map(t => ({ name: String(t.first || ''), artist: String(t.second || '') }))
+      });
+      return { ok: true,
+        official: list.filter(x => x.ToplistType).map(card),
+        selected: list.filter(x => !x.ToplistType).map(card) };
+    } catch (err) { return { ok: false, error: '获取排行榜失败：' + ncFail(err, '网络异常') }; }
+  });
+
+  // 新歌速递：地区筛选（全部 / 华语 / 欧美 / 韩国 / 日本）
+  const NEW_SONG_AREAS = { all: 0, zh: 7, ea: 96, kr: 16, jp: 8 };
+  ipcMain.handle('online:newSongs', async (_e, area) => {
+    const type = NEW_SONG_AREAS[String(area)] ?? 0;
+    try {
+      const r = await nc.top_song(ncOpts({ type }));
+      const list = (r.body && r.body.data) || [];
+      return { ok: true, songs: list.slice(0, 50).map(songView), area: String(area || 'all') };
+    } catch (err) { return { ok: false, error: '获取新歌失败：' + ncFail(err, '网络异常') }; }
+  });
+
+  // 试听：命中风控时 fetchSongUrl 会自动切换备用接口，正常情况下用户无感
+  ipcMain.handle('online:songUrl', async (_e, payload) => {
+    const p = (payload && typeof payload === 'object') ? payload : { id: payload };
+    const r = await fetchSongUrl(p.id, p.level);
+    if (!r.ok) return { ok: false, error: r.error, risk: !!r.risk };
+    return { ok: true, url: r.url, type: r.type, trial: r.trial, level: r.level,
+      via: r.via, cached: !!r.cached, code: r.code || null };
+  });
+
+  ipcMain.handle('online:download', async (_e, song) => downloadSongFile(song || {}));
+
+  // 歌单 / 榜单详情：结果区顶部用封面、创建者、简介、歌曲数展示（SPlayer ListDetail 的精简版）
   ipcMain.handle('online:playlist', async (_e, input) => {
     try {
       const m = String(input || '').match(/(?:id=|^)(\d{4,})/);
       if (!m) return { ok: false, error: '无法识别歌单 ID，请粘贴歌单链接或纯数字 ID' };
       const plId = m[1];
-      const det = await nc.playlist_detail({ id: plId });
+      const det = await nc.playlist_detail(ncOpts({ id: plId }));
       const pl = det.body && det.body.playlist;
       if (!pl) return { ok: false, error: '歌单不存在或无法访问' };
-      const tr = await nc.playlist_track_all({ id: plId, limit: 100 }); // 最多取前 100 首
+      const tr = await nc.playlist_track_all(ncOpts({ id: plId, limit: 100 })); // 最多取前 100 首
       const tracks = (tr.body && tr.body.songs) || [];
       return { ok: true, name: pl.name, total: pl.trackCount || tracks.length,
-        songs: tracks.map(sg => ({
-          id: sg.id, name: sg.name, artist: artistNames(sg.ar || sg.artists),
-          duration: (sg.dt || sg.duration) ? Math.round((sg.dt || sg.duration) / 1000) : null,
-          fee: sg.fee })) };
-    } catch (err) { return { ok: false, error: '歌单获取失败，请检查网络连接' }; }
+        songs: tracks.map(songView),
+        detail: {
+          cover: toHttps(pl.coverImgUrl || ''),
+          description: String(pl.description || '').slice(0, 200),
+          creator: (pl.creator && pl.creator.nickname) || '',
+          tags: Array.isArray(pl.tags) ? pl.tags.slice(0, 4) : [],
+          playCount: pl.playCount || 0,
+          updateTime: pl.updateTime || null
+        } };
+    } catch (err) { return { ok: false, error: '歌单获取失败：' + ncFail(err, '请检查网络连接') }; }
   });
 
   // 个性推荐（推荐新歌 personalized_newsong，匿名可用）
   ipcMain.handle('online:daily', async () => {
     try {
-      const r = await nc.personalized_newsong({ limit: 30 });
+      const r = await nc.personalized_newsong(ncOpts({ limit: 30 }));
       const list = (r.body && r.body.result) || [];
-      if (!list.length) throw new Error('empty');
-      return { ok: true, songs: list.map(it => ({
-        id: it.id, name: it.name, artist: artistNames(it.song && (it.song.artists || it.song.ar)),
-        duration: (it.song && it.song.duration) ? Math.round(it.song.duration / 1000) : null,
-        fee: (it.song && it.song.fee) || it.fee })) };
-    } catch (err) { return { ok: false, error: '获取个性推荐失败，请检查网络连接' }; }
+      if (!list.length) return { ok: false, error: '暂时没有个性推荐' };
+      return { ok: true, songs: list.map(songView) };
+    } catch (err) { return { ok: false, error: '获取个性推荐失败：' + ncFail(err, '网络异常') }; }
   });
 
   // 发现音乐（推荐歌单）
   ipcMain.handle('online:discover', async () => {
     try {
-      const r = await nc.personalized({ limit: 12 });
+      const r = await nc.personalized(ncOpts({ limit: 18 }));
       const pls = (r.body && r.body.result) || [];
       return { ok: true, playlists: pls.map(pl => ({
         id: pl.id, name: pl.name,
-        picUrl: pl.picUrl ? String(pl.picUrl).replace(/^http:/, 'https:') : '',
-        playCount: pl.playCount })) };
-    } catch (err) { return { ok: false, error: '获取推荐歌单失败，请检查网络连接' }; }
+        picUrl: toHttps(pl.picUrl),
+        playCount: pl.playCount || 0,
+        trackCount: pl.trackCount || 0,
+        copywriter: String(pl.copywriter || '')
+      })) };
+    } catch (err) { return { ok: false, error: '获取推荐歌单失败：' + ncFail(err, '网络异常') }; }
   });
 
   // 作息方案（加载时一次性迁移：提前播放 advance 由"分钟"改为"秒"）
@@ -683,7 +1147,7 @@ function registerIpc() {
     version: app.getVersion(),
     dataDir: DATA_DIR,
     autoLaunch: app.getLoginItemSettings().openAtLogin,
-    keepAwake: sleepBlockerId !== null
+    keepAwake: sleepBlockerId !== null && powerSaveBlocker.isStarted(sleepBlockerId)
   }));
   ipcMain.handle('app:setAutoLaunch', (_e, enabled) => {
     app.setLoginItemSettings({
