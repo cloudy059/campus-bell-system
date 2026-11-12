@@ -53,7 +53,8 @@ const updateFill = (input, pct) => input.style.setProperty('--fill', pct + '%');
 const eqHtml = () => `<div class="eq"><i></i><i></i><i></i><i></i></div>`;
 
 /* ---------- 全局状态 ---------- */
-const DEFAULT_SETTINGS = { volume: 0.85, fadeIn: 0, fadeOut: 0, outputDevice: 'default', tempMuteUntil: null, theme: 'dark', keepAwake: true, ovCollapsed: false };
+const DEFAULT_SETTINGS = { volume: 0.85, fadeIn: 0, fadeOut: 0, outputDevice: 'default', tempMuteUntil: null, theme: 'system', keepAwake: true, ovCollapsed: false };
+const Theme = window.CampusBellTheme; // 主题模式解析（theme.js 先于本文件加载）
 const state = {
   library: { items: [] },
   schedules: { sets: [], overrides: [] },
@@ -102,7 +103,9 @@ async function init() {
   state.exams = exa && exa.exams ? exa : { exams: [] };
   state.examSchemes = esch && esch.schemes ? esch : { schemes: [] };
   state.settings = { ...DEFAULT_SETTINGS, ...(set || {}) };
+  state.settings.theme = Theme.normalize(state.settings.theme); // 非法 / 缺失值回落到默认的「跟随系统」
   applyTheme();
+  initSystemThemeSync();
   if (state.settings.tempMuteUntil && Date.now() >= state.settings.tempMuteUntil) state.settings.tempMuteUntil = null;
   try { const lg = await bellApi.logs.load(); state.logs = lg || { entries: [] }; } catch { /* ignore */ }
   try { state.appInfo = await bellApi.app.info(); } catch { /* ignore */ }
@@ -2805,10 +2808,14 @@ function saveSettingsSoon() {
 function bindSettingsPage() {
   $('#set-volume').addEventListener('input', (e) => applyVolume(e.target.value / 100));
   $('#set-theme').addEventListener('change', (e) => {
-    state.settings.theme = e.target.value;
+    const mode = Theme.normalize(e.target.value);
+    state.settings.theme = mode;
     applyTheme();
     saveSettingsSoon();
-    toast(e.target.value === 'light' ? '已切换到亮色主题' : '已切换到深色主题', 'success');
+    const label = mode === 'system'
+      ? `已跟随系统（当前为${Theme.systemLabel()}）`
+      : (mode === 'light' ? '已切换到亮色主题' : '已切换到深色主题');
+    toast(label, 'success');
   });
   $('#set-fadein').addEventListener('change', (e) => { state.settings.fadeIn = Number(e.target.value) || 0; saveSettingsSoon(); });
   $('#set-fadeout').addEventListener('change', (e) => { state.settings.fadeOut = Number(e.target.value) || 0; saveSettingsSoon(); });
@@ -2872,7 +2879,8 @@ function syncSettingsUI() {
   updateFill(pv, v);
   $('#set-fadein').value = state.settings.fadeIn || 0;
   $('#set-fadeout').value = state.settings.fadeOut || 0;
-  $('#set-theme').value = state.settings.theme === 'light' ? 'light' : 'dark';
+  $('#set-theme').value = Theme.normalize(state.settings.theme);
+  updateThemeHint();
   $('#set-autolaunch').checked = !!state.appInfo.autoLaunch;
   // 显示主进程真实持有的电源阻塞状态，而不是配置文件里的期望值
   $('#set-keepawake').checked = state.appInfo.keepAwake !== undefined
@@ -2883,9 +2891,33 @@ function syncSettingsUI() {
   updateMuteButtons(isMuted());
 }
 
-/* 主题切换 */
+/* 主题切换：system 跟随系统，dark / light 手动固定 */
 function applyTheme() {
-  document.body.dataset.theme = state.settings.theme === 'light' ? 'light' : 'dark';
+  const mode = Theme.normalize(state.settings.theme);
+  Theme.applyToBody(mode);
+  Theme.remember(mode); // 缓存首屏主题，避免下次启动闪一下
+  updateThemeHint();
+}
+function updateThemeHint() {
+  const el = $('#theme-system-hint');
+  if (!el) return;
+  const mode = Theme.normalize(state.settings.theme);
+  el.textContent = mode === 'system'
+    ? `跟随系统 · 当前为${Theme.systemLabel()}`
+    : `系统当前为${Theme.systemLabel()}`;
+}
+/** 系统主题变化：以主进程 nativeTheme 广播为准，prefers-color-scheme 作即时兜底 */
+function initSystemThemeSync() {
+  Theme.onSystemChange(() => applyTheme());
+  if (!bellApi.app.systemTheme) return;
+  bellApi.app.systemTheme()
+    .then((r) => { if (r && typeof r.isDark === 'boolean') Theme.setSystemDark(r.isDark); })
+    .catch(() => { /* 继续用 prefers-color-scheme */ });
+  if (bellApi.app.onSystemThemeChange) {
+    bellApi.app.onSystemThemeChange((info) => {
+      if (info && typeof info.isDark === 'boolean') Theme.setSystemDark(info.isDark);
+    });
+  }
 }
 
 /* ============================================================

@@ -300,8 +300,9 @@
             <div class="card">
               <div class="card-title">外观</div>
               <div class="form-row">
-                <label>界面主题<br><small>深色 / 亮色，切换即时生效</small></label>
+                <label>界面主题<br><small>跟随系统 / 深色 / 亮色，切换即时生效<br><span class="theme-hint" id="theme-system-hint"></span></small></label>
                 <select id="set-theme">
+                  <option value="system">跟随系统（默认）</option>
                   <option value="dark">深色</option>
                   <option value="light">亮色</option>
                 </select>
@@ -367,6 +368,7 @@
 
   <div id="modal-root"></div>
   <div id="toast-root"></div>
+  <script src="theme.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

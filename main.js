@@ -1,6 +1,6 @@
 // 主进程：窗口管理、系统托盘、数据持久化（IPC）、单实例、开机自启
 'use strict';
-const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, nativeImage, screen, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, nativeImage, nativeTheme, screen, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -30,6 +30,11 @@ const TTS_PREVIEW_DIR = path.join(DATA_DIR, 'tts-preview');
 const SET_FILE = path.join(DATA_DIR, 'settings.json');
 const LOG_FILE = path.join(DATA_DIR, 'logs.json');
 const LOG_LIMIT = 2000;
+
+/** 系统主题（Electron 权威值）；渲染端据此实现「跟随系统」 */
+function systemThemeInfo() {
+  return { isDark: nativeTheme.shouldUseDarkColors, source: nativeTheme.themeSource };
+}
 const NETEASE_FILE = path.join(DATA_DIR, 'netease.json'); // 网易云登录凭证（含 Cookie，仅存本机，不参与备份导出）
 
 let win = null;
@@ -234,6 +239,13 @@ function init() {
   createWindow();
   createTray();
   registerIpc();
+  // 系统切换深色 / 亮色时通知所有窗口；渲染端仅在「跟随系统」模式下改配色
+  nativeTheme.on('updated', () => {
+    const info = systemThemeInfo();
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('app:systemThemeChanged', info);
+    }
+  });
   app.on('will-quit', () => applyKeepAwake(false)); // 退出时释放，恢复系统默认电源策略
 }
 
@@ -268,7 +280,7 @@ function createWindow() {
     minHeight: 700,
     frame: false,                       // 无边框，自定义标题栏
     show: false,
-    backgroundColor: '#0b0f1d',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0f1d' : '#eef1f8', // 与主题一致，避免亮色下窗口边缘露深色
     icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1161,6 +1173,7 @@ function registerIpc() {
     autoLaunch: app.getLoginItemSettings().openAtLogin,
     keepAwake: sleepBlockerId !== null && powerSaveBlocker.isStarted(sleepBlockerId)
   }));
+  ipcMain.handle('app:systemTheme', () => systemThemeInfo());
   ipcMain.handle('app:setAutoLaunch', (_e, enabled) => {
     app.setLoginItemSettings({
       openAtLogin: !!enabled,

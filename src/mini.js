@@ -14,6 +14,8 @@ const fmtHMS = (sec) => `${pad(Math.floor(sec / 3600))}:${pad(Math.floor(sec / 6
 const secToHM = (sec) => `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec % 3600) / 60))}`;
 
 const state = { sets: [], overrides: [], exams: [] };
+const Theme = window.CampusBellTheme; // 与主界面共用主题模式解析
+let miniThemeMode = Theme.readCached();
 
 /* 今日生效的铃声（特殊日期覆盖 + 按星期匹配启用方案）
    与主界面一致：特殊日期支持 date ~ endDate 范围，单日记录优先于范围记录 */
@@ -91,12 +93,28 @@ async function reloadData() {
   } catch { /* 忽略 */ }
   try {
     const st = await bellApi.settings.load();
-    document.body.dataset.theme = (st && st.theme) || 'dark';
+    miniThemeMode = Theme.normalize((st && st.theme) || Theme.DEFAULT_MODE);
+    Theme.remember(miniThemeMode);
+    Theme.applyToBody(miniThemeMode);
   } catch { /* 忽略 */ }
 }
 
 $('#m-close').addEventListener('click', (e) => { e.stopPropagation(); bellApi.mini.hide(); });
 $('#bar').addEventListener('click', () => bellApi.mini.openMain());
+
+/* 跟随系统：系统深浅色变化时立即刷新（手动固定深色 / 亮色时配色不变） */
+Theme.onSystemChange(() => Theme.applyToBody(miniThemeMode));
+if (bellApi.app.systemTheme) {
+  bellApi.app.systemTheme()
+    .then((r) => { if (r && typeof r.isDark === 'boolean') Theme.setSystemDark(r.isDark); })
+    .catch(() => { /* 继续用 prefers-color-scheme */ });
+}
+if (bellApi.app.onSystemThemeChange) {
+  bellApi.app.onSystemThemeChange((info) => {
+    if (info && typeof info.isDark === 'boolean') Theme.setSystemDark(info.isDark);
+  });
+}
+Theme.applyToBody(miniThemeMode);
 
 reloadData().then(() => render(new Date()));
 let lastReload = 0;

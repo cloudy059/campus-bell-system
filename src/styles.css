@@ -910,6 +910,9 @@ body[data-theme="light"] .bell-time::-webkit-calendar-picker-indicator,
 body[data-theme="light"] .ov-date::-webkit-calendar-picker-indicator,
 body[data-theme="light"] .ov-end::-webkit-calendar-picker-indicator { filter: none; }
 
+/* 设置页：跟随系统时的实时状态提示 */
+.theme-hint { color: var(--accent); font-weight: 600; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 1180px) {
   .dash-grid { grid-template-columns: 1fr 1fr; }

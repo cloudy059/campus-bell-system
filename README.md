@@ -2,7 +2,7 @@
 
 基于 Electron 的校园自动音乐铃声播放系统：按作息时间表自动播放铃声音乐，支持多套作息方案、音乐库管理、考试播报、语音合成与播放日志，开箱即用。
 
-![Version](https://img.shields.io/badge/版本-v1.2.0-orange)
+![Version](https://img.shields.io/badge/版本-v1.3.0-orange)
 ![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
 ![Platform](https://img.shields.io/badge/平台-Windows-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -43,7 +43,7 @@
 - 输出设备选择（setSinkId）
 - 仪表盘：大屏渐变时钟、下次铃声倒计时、今日铃声时间线（已播放 / 即将响铃 / 已过未播 / 静音跳过）
 - 播放记录：自动 / 手动 / 静音跳过三类日志，上限 2000 条，可一键清空
-- 深色 / 亮色主题切换，现代深色设计
+- **界面主题默认跟随系统**（Windows 切换深色 / 亮色时应用自动同步），也可手动固定深色或亮色；主界面与迷你悬浮条一致
 
 ### 系统集成
 - **运行时阻止电脑休眠**：防止休眠导致铃声漏播（可在设置中关闭；开启期间屏幕不会自动熄灭）
@@ -105,6 +105,10 @@ npm run pack
 | 在线音乐 | NeteaseCloudMusicApi 4.32（`cloudsearch` / `toplist_detail` / `top_song` / `personalized` / `playlist`；取链 `song_url_v1` 自动降级到 `song_url` / `song_download_url_v1` / `song_download_url`，带缓存与限流；扫码、短信验证码、Cookie 三种登录方式，所有请求统一携带登录凭证；播放始终走本地文件） |
 
 ## 🗓 版本历史
+
+### v1.3.0（2026-11-12）
+- **界面主题跟随系统**：新增「跟随系统」模式并设为默认，Windows 切换深色 / 亮色时主界面与迷你悬浮条自动同步；仍可手动固定深色或亮色。设置页实时显示系统当前主题，首屏按上次选择着色避免闪烁。已有明确主题设置的用户保留原选择，在设置页切换即可。
+- 打包输出目录改为 `dist4/`（历史目录被系统占用，不覆盖旧产物）。
 
 ### v1.2.0（2026-11-08）
 - **特殊日期升级**：支持**日期范围**（含首尾）与**自定义名称**；**整块特殊日期容器可一键收起 / 展开**（状态存 `settings.json`，重启保持），单条记录也可折叠 / 全部收起；主界面与迷你悬浮条均按范围匹配，同一天有多条时单日记录优先，完全兼容旧的单日数据；节假日模板改为按节日导入带名称的范围卡片并自动合并旧单日记录。

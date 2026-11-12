@@ -5,6 +5,10 @@ node_modules/
 dist/
 dist2/
 dist3/
+dist4/
+
+# 论坛发帖素材（截图体积大，仅本地留存）
+post/
 
 # 本地工具 / IDE
 .npm-shim/

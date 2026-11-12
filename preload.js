@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('bellApi', {
   },
   app: {
     info: () => ipcRenderer.invoke('app:info'),
+    systemTheme: () => ipcRenderer.invoke('app:systemTheme'),
+    onSystemThemeChange: (cb) => ipcRenderer.on('app:systemThemeChanged', (_e, info) => cb(info)),
     setAutoLaunch: (v) => ipcRenderer.invoke('app:setAutoLaunch', v),
     setKeepAwake: (v) => ipcRenderer.invoke('app:setKeepAwake', v),
     openDataFolder: () => ipcRenderer.invoke('app:openDataFolder'),
